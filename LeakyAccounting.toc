@@ -1,0 +1,25 @@
+## Interface: 120000, 120001, 120005
+## Title: Leaky Accounting
+## Notes: Lightweight accounting — tracks items bought/sold, gold spent/gained, per-character and account-wide.
+## Author: Leaky-BleedingHollow
+## Version: 0.1.0
+## SavedVariables: LeakyAccountingDB
+## OptionalDeps: Ace3
+
+# Libraries
+embeds.xml
+
+# Core
+main.lua
+
+# Modules
+modules\core.lua
+modules\vendor.lua
+modules\mail.lua
+modules\trade.lua
+modules\money.lua
+
+# UI
+ui\ui.lua
+ui\chart.lua
+ui\itemized.lua

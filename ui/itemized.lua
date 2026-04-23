@@ -30,6 +30,52 @@ local session = {
 }
 
 -- -------------------------------------------------- --
+--  Item-info resolver                                --
+-- -------------------------------------------------- --
+
+-- Resolves a transaction's item-link (colored hyperlink) lazily:
+--   * itemLink present → use it (already colored via |c escapes)
+--   * itemName only    → C_Item.GetItemInfo(name) returns the link once the
+--     client caches the item. Returns (link, quality) or (nil, nil) if not
+--     yet cached. On cache miss, GET_ITEM_INFO_RECEIVED fires later and we
+--     re-render the whole view.
+local function resolveItemLink(txn)
+    if txn.itemLink then return txn.itemLink end
+    if txn.itemName and txn.itemName ~= "" then
+        local _, link = C_Item.GetItemInfo(txn.itemName)
+        return link
+    end
+end
+
+-- Returns an inline atlas markup for the crafted-quality tier (1–5), or nil.
+-- Uses C_TradeSkillUI.GetItemCraftedQualityInfo().iconChat; same pattern the
+-- Blizzard auction-house UI uses to show tier stars on items.
+local function craftedQualityMarkup(link)
+    if not link then return nil end
+    if not C_TradeSkillUI or not C_TradeSkillUI.GetItemCraftedQualityInfo then return nil end
+    local info = C_TradeSkillUI.GetItemCraftedQualityInfo(link)
+    if not info or not info.iconChat then return nil end
+    return CreateAtlasMarkup(info.iconChat, 17, 15, 1, 0)
+end
+
+-- Resolve async item-info events and trigger a UI refresh if the frame is
+-- showing. Debounced to one refresh per 0.25s so a flurry of events on
+-- login doesn't hammer the renderer.
+do
+    local pending = false
+    local f = CreateFrame("Frame")
+    f:RegisterEvent("GET_ITEM_INFO_RECEIVED")
+    f:SetScript("OnEvent", function()
+        if pending then return end
+        pending = true
+        C_Timer.After(0.25, function()
+            pending = false
+            if ns.OnDataChanged then ns.OnDataChanged() end
+        end)
+    end)
+end
+
+-- -------------------------------------------------- --
 --  Column definitions                                --
 -- -------------------------------------------------- --
 
@@ -78,7 +124,13 @@ local function buildColumns(scope)
     }
     add {
         key = "item", label = "Item", w = 220,
-        render  = function(t) return t.itemLink or t.itemName or "?", nil end,
+        render  = function(t)
+            local link    = resolveItemLink(t)
+            local display = link or t.itemName or "?"
+            local tier    = craftedQualityMarkup(link)
+            if tier then display = display .. " " .. tier end
+            return display, nil
+        end,
         sortVal = itemSortVal,
     }
     add {
@@ -222,6 +274,12 @@ local function layoutHeaderAndRows(layout)
                     fs:SetWidth(w)
                     fs:SetJustifyH(col.justify or "LEFT")
                 end
+                -- Tooltip / shift-click hitbox sits over the item cell.
+                if col.key == "item" and row.itemHitbox then
+                    row.itemHitbox:ClearAllPoints()
+                    row.itemHitbox:SetPoint("LEFT", row, "LEFT", rx, 0)
+                    row.itemHitbox:SetSize(w, ROW_H)
+                end
                 rx = rx + w + COL_PAD
             end
         end
@@ -346,6 +404,34 @@ end
 --  Row pool                                          --
 -- -------------------------------------------------- --
 
+local function itemHitboxEnter(self)
+    local link = self._itemLink
+    if not link and self._itemName then
+        _, link = C_Item.GetItemInfo(self._itemName)
+    end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    if link then
+        GameTooltip:SetHyperlink(link)
+    elseif self._itemName then
+        GameTooltip:SetText(self._itemName)
+    end
+    GameTooltip:Show()
+end
+
+local function itemHitboxLeave()
+    GameTooltip:Hide()
+end
+
+local function itemHitboxClick(self)
+    if IsModifiedClick("CHATLINK") then
+        local link = self._itemLink
+        if not link and self._itemName then
+            _, link = C_Item.GetItemInfo(self._itemName)
+        end
+        if link then HandleModifiedItemClick(link) end
+    end
+end
+
 local function getRow(layout, idx)
     local r = layout.rows[idx]
     if r then r:Show(); return r end
@@ -365,6 +451,16 @@ local function getRow(layout, idx)
         row.fs[col.key] = fs
     end
 
+    -- Invisible hitbox over the item cell for tooltip + shift-click linking.
+    -- Sized and positioned later in layoutHeaderAndRows.
+    local hitbox = CreateFrame("Button", nil, row)
+    hitbox:EnableMouse(true)
+    hitbox:RegisterForClicks("AnyUp")
+    hitbox:SetScript("OnEnter", itemHitboxEnter)
+    hitbox:SetScript("OnLeave", itemHitboxLeave)
+    hitbox:SetScript("OnClick", itemHitboxClick)
+    row.itemHitbox = hitbox
+
     layout.rows[idx] = row
     return row
 end
@@ -377,6 +473,10 @@ local function fillRow(row, cols, txn)
             fs:SetText(text or "")
             if color then fs:SetTextColor(unpack(color)) else fs:SetTextColor(1, 1, 1, 1) end
         end
+    end
+    if row.itemHitbox then
+        row.itemHitbox._itemLink = txn.itemLink
+        row.itemHitbox._itemName = txn.itemName
     end
 end
 

@@ -62,6 +62,11 @@ function LA:OnEnable()
 end
 
 function LA:PLAYER_LOGIN()
+    -- Anchor "session" to first login of this client run; stays constant
+    -- across /reload within the same session because module locals reset,
+    -- but if you want session=since-reload, that's what you get.
+    ns.sessionStart = time()
+
     -- Modules register their own hooks lazily in their *_OnLoad functions,
     -- which are invoked here now that the player character is known.
     if ns.VendorOnLoad then ns.VendorOnLoad() end

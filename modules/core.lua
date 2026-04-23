@@ -210,6 +210,34 @@ function ns.CollectTotals(scope)
     return income, spend, income - spend
 end
 
+-- Totals but only counting deltas after `sinceTime`. Used for session stats.
+-- The baseline is the last snapshot strictly before sinceTime (or the first
+-- snapshot if every entry is after). Deltas are summed from baseline forward.
+function ns.CollectTotalsSince(scope, sinceTime)
+    if not sinceTime then return 0, 0, 0 end
+    local income, spend = 0, 0
+    local function fold(bucket)
+        local log = bucket.goldLog
+        if #log == 0 then return end
+        local startIdx = 1
+        for i = 1, #log do
+            if log[i].t < sinceTime then startIdx = i else break end
+        end
+        for i = startIdx + 1, #log do
+            local d = log[i].gold - log[i - 1].gold
+            if d > 0 then income = income + d
+            elseif d < 0 then spend = spend - d end
+        end
+    end
+    if scope == "account" then
+        for _, b in ns.IterCharacters() do fold(b) end
+    else
+        local b = ns.GetCharBucket()
+        if b then fold(b) end
+    end
+    return income, spend, income - spend
+end
+
 -- Collect gold snapshots across scope, sorted ascending by time.
 -- In account scope, snapshots are unioned per-character — each character line
 -- is independent; the chart sums concurrent balances by computing the

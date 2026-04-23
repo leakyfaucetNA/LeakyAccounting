@@ -2,7 +2,7 @@ local _, ns = ...
 
 -- Net-gold-over-time line chart. Axes + labels + a polyline built from
 -- 1px WHITE8x8 textures (no external graph lib). Below the chart sits a
--- totals strip: Income / Spend / Net in the selected scope.
+-- totals strip: Earned / Spent / Net in the selected scope.
 
 local T  -- ns.theme, bound lazily so it's always the current copy
 
@@ -14,38 +14,106 @@ local function ensurePlotArea(parent)
     if parent._plot then return parent._plot end
 
     T = ns.theme
+
+    local STRIP_H    = 64  -- two rows (session + total)
+    local TOPBAR_H   = 26  -- "Current Gold" label strip
+
+    -- Top bar: shows current gold. Hover opens a tooltip listing per-char
+    -- gold in account scope. Uses a Button frame so we get mouse events.
+    local topBar = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    ns.SetBD(topBar, T.C_PANEL, T.C_BDR)
+    topBar:SetPoint("TOPLEFT",  T.PAD, -T.PAD)
+    topBar:SetPoint("TOPRIGHT", -T.PAD, -T.PAD)
+    topBar:SetHeight(TOPBAR_H)
+    topBar:EnableMouse(true)
+
+    local topLbl = ns.MakeLabel(topBar, "Current Gold:", 12, T.C_DIM)
+    topLbl:SetPoint("LEFT", 12, 0)
+    local topVal = ns.MakeLabel(topBar, "", 12, T.C_TEXT)
+    topVal:SetPoint("LEFT", topLbl, "RIGHT", 6, 0)
+
+    parent._topBar    = topBar
+    parent._topLabel  = topLbl
+    parent._topGold   = topVal
+
+    -- Tooltip: only fires in account scope. RenderChart keeps _scope fresh.
+    topBar:SetScript("OnEnter", function(self)
+        if self._scope ~= "account" then return end
+        local entries = {}
+        for key, bucket in ns.IterCharacters() do
+            local gold
+            if key == ns.GetCharKey() then
+                gold = GetMoney()
+            else
+                local log = bucket.goldLog
+                gold = (log and #log > 0) and log[#log].gold or 0
+            end
+            entries[#entries + 1] = {
+                name  = bucket.name  or "?",
+                realm = bucket.realm or "?",
+                class = bucket.class,
+                gold  = gold,
+            }
+        end
+        if #entries == 0 then return end
+        table.sort(entries, function(a, b) return a.gold > b.gold end)
+
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Account Gold", 1, 1, 1)
+        for _, e in ipairs(entries) do
+            local c = e.class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[e.class]
+            local hex = c and string.format("ff%02x%02x%02x",
+                math.floor(c.r * 255 + 0.5),
+                math.floor(c.g * 255 + 0.5),
+                math.floor(c.b * 255 + 0.5)) or "ffffffff"
+            local left = string.format("|c%s%s|r  |cff888888%s|r", hex, e.name, e.realm)
+            GameTooltip:AddDoubleLine(left, ns.FormatMoney(e.gold))
+        end
+        GameTooltip:Show()
+    end)
+    topBar:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
     local plot = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     ns.SetBD(plot, T.C_BG, T.C_BDR)
-    plot:SetPoint("TOPLEFT",     T.PAD, -T.PAD)
-    plot:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD + 44)  -- leave room for totals strip
+    plot:SetPoint("TOPLEFT",     T.PAD, -(T.PAD + TOPBAR_H + 4))
+    plot:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD + STRIP_H + 4)
 
     plot._lines    = {}  -- pool of Line objects for polyline + gridlines
     plot._marks    = {}  -- axis tick + label pools
 
     parent._plot = plot
 
-    -- Totals strip under the plot
+    -- Two-row totals strip: Session on top, all-time Total below.
     local strip = ns.MakePanel(parent, T.C_PANEL, T.C_BDR)
     strip:SetPoint("BOTTOMLEFT",  T.PAD, T.PAD)
     strip:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD)
-    strip:SetHeight(36)
+    strip:SetHeight(STRIP_H)
 
-    local incomeLbl = ns.MakeLabel(strip, "Income:", 12, T.C_DIM)
-    incomeLbl:SetPoint("LEFT", 12, 0)
-    local incomeVal = ns.MakeLabel(strip, "", 12, T.C_GOOD)
-    incomeVal:SetPoint("LEFT", incomeLbl, "RIGHT", 6, 0)
+    local function buildRow(title, yOff)
+        local head = ns.MakeLabel(strip, title, 12, T.C_ACCENT)
+        head:SetPoint("TOPLEFT", 12, yOff)
+        local earnedLbl = ns.MakeLabel(strip, "Earned:", 12, T.C_DIM)
+        earnedLbl:SetPoint("LEFT", head, "RIGHT", 10, 0)
+        local earnedVal = ns.MakeLabel(strip, "", 12, T.C_GOOD)
+        earnedVal:SetPoint("LEFT", earnedLbl, "RIGHT", 6, 0)
 
-    local spendLbl = ns.MakeLabel(strip, "Spend:", 12, T.C_DIM)
-    spendLbl:SetPoint("LEFT", incomeVal, "RIGHT", 20, 0)
-    local spendVal = ns.MakeLabel(strip, "", 12, T.C_BAD)
-    spendVal:SetPoint("LEFT", spendLbl, "RIGHT", 6, 0)
+        local spendLbl = ns.MakeLabel(strip, "Spent:", 12, T.C_DIM)
+        spendLbl:SetPoint("LEFT", earnedVal, "RIGHT", 20, 0)
+        local spendVal = ns.MakeLabel(strip, "", 12, T.C_BAD)
+        spendVal:SetPoint("LEFT", spendLbl, "RIGHT", 6, 0)
 
-    local netLbl = ns.MakeLabel(strip, "Net:", 12, T.C_DIM)
-    netLbl:SetPoint("LEFT", spendVal, "RIGHT", 20, 0)
-    local netVal = ns.MakeLabel(strip, "", 12, T.C_TEXT)
-    netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
+        local netLbl = ns.MakeLabel(strip, "Net:", 12, T.C_DIM)
+        netLbl:SetPoint("LEFT", spendVal, "RIGHT", 20, 0)
+        local netVal = ns.MakeLabel(strip, "", 12, T.C_TEXT)
+        netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
 
-    parent._totals = { income = incomeVal, spend = spendVal, net = netVal }
+        return { earned = earnedVal, spend = spendVal, net = netVal }
+    end
+
+    parent._totals = {
+        session = buildRow("Session", -6),
+        total   = buildRow("Total",   -34),
+    }
 
     return plot
 end
@@ -120,17 +188,44 @@ function ns.RenderChart(parent, scope)
     local totals = parent._totals
     releaseChildren(plot)
 
-    local log = ns.CollectGoldLog(scope)
-    local income, spend, net = ns.CollectTotals(scope)
-
-    totals.income:SetText(ns.FormatMoney(income))
-    totals.spend:SetText(ns.FormatMoney(spend))
-    totals.net:SetText(ns.FormatMoney(net))
-    if net >= 0 then
-        totals.net:SetTextColor(unpack(T.C_GOOD))
-    else
-        totals.net:SetTextColor(unpack(T.C_BAD))
+    -- Current-gold strip at the top. Character scope: GetMoney() for the
+    -- logged-in character. Account scope: GetMoney() for self + last-known
+    -- goldLog for each other character, summed. Tooltip handler reads
+    -- `_scope` off the bar and skips tooltip rendering in char scope.
+    do
+        local label, total
+        if scope == "account" then
+            label = "Current Gold (Account):"
+            total = 0
+            for key, bucket in ns.IterCharacters() do
+                if key == ns.GetCharKey() then
+                    total = total + GetMoney()
+                else
+                    local log = bucket.goldLog
+                    if log and #log > 0 then total = total + log[#log].gold end
+                end
+            end
+        else
+            label = "Current Gold:"
+            total = GetMoney()
+        end
+        parent._topBar._scope = scope
+        parent._topLabel:SetText(label)
+        parent._topGold:SetText(ns.FormatMoney(total))
     end
+
+    local log = ns.CollectGoldLog(scope)
+    local income,  spend,  net  = ns.CollectTotals(scope)
+    local sIncome, sSpend, sNet = ns.CollectTotalsSince(scope, ns.sessionStart)
+
+    local function fillRow(row, earned, spent, netv)
+        row.earned:SetText(ns.FormatMoney(earned))
+        row.spend:SetText(ns.FormatMoney(spent))
+        row.net:SetText(ns.FormatMoney(netv))
+        row.net:SetTextColor(unpack(netv >= 0 and T.C_GOOD or T.C_BAD))
+    end
+    fillRow(totals.session, sIncome, sSpend, sNet)
+    fillRow(totals.total,   income,  spend,  net)
 
     -- Empty-state
     if #log < 2 then

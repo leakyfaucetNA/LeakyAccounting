@@ -104,22 +104,32 @@ ns.SetBD      = SetBD
 local frame
 local activeTab = "chart"
 local scope     = "char"  -- "char" | "account"
-local chartContent, itemizedContent
-local chartBtn, itemizedBtn
-local scopeCharBtn, scopeAccountBtn
+local chartContent, itemizedContent, charactersContent
+local chartBtn, itemizedBtn, charactersBtn
+local scopeCharBtn, scopeAccountBtn, scopeLbl
 
 local function refresh()
     chartContent:SetShown(activeTab == "chart")
     itemizedContent:SetShown(activeTab == "itemized")
-    setTabState(chartBtn,    activeTab == "chart")
-    setTabState(itemizedBtn, activeTab == "itemized")
+    charactersContent:SetShown(activeTab == "characters")
+    setTabState(chartBtn,      activeTab == "chart")
+    setTabState(itemizedBtn,   activeTab == "itemized")
+    setTabState(charactersBtn, activeTab == "characters")
     setTabState(scopeCharBtn,    scope == "char")
     setTabState(scopeAccountBtn, scope == "account")
+
+    -- Scope toggle is meaningless on the Characters tab (always all chars).
+    local showScope = activeTab ~= "characters"
+    scopeLbl:SetShown(showScope)
+    scopeCharBtn:SetShown(showScope)
+    scopeAccountBtn:SetShown(showScope)
 
     if activeTab == "chart" and ns.RenderChart then
         ns.RenderChart(chartContent, scope)
     elseif activeTab == "itemized" and ns.RenderItemized then
         ns.RenderItemized(itemizedContent, scope)
+    elseif activeTab == "characters" and ns.RenderCharacters then
+        ns.RenderCharacters(charactersContent)
     end
 end
 
@@ -174,8 +184,12 @@ local function build()
     itemizedBtn:SetPoint("LEFT", chartBtn, "RIGHT", 6, 0)
     itemizedBtn:SetScript("OnClick", function() activeTab = "itemized" refresh() end)
 
+    charactersBtn = MakeButton(tabBar, "Characters", 90, 22)
+    charactersBtn:SetPoint("LEFT", itemizedBtn, "RIGHT", 6, 0)
+    charactersBtn:SetScript("OnClick", function() activeTab = "characters" refresh() end)
+
     -- Scope toggle (right side)
-    local scopeLbl = MakeLabel(tabBar, "Scope:", 12, C_DIM)
+    scopeLbl = MakeLabel(tabBar, "Scope:", 12, C_DIM)
     scopeAccountBtn = MakeButton(tabBar, "Account", 80, 22)
     scopeAccountBtn:SetPoint("RIGHT", -PAD, 0)
     scopeAccountBtn:SetScript("OnClick", function() scope = "account" refresh() end)
@@ -194,6 +208,10 @@ local function build()
     itemizedContent = MakePanel(frame, C_PANEL, C_BDR)
     itemizedContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
     itemizedContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
+
+    charactersContent = MakePanel(frame, C_PANEL, C_BDR)
+    charactersContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
+    charactersContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
 
     -- Bottom-right resize grip
     local grip = CreateFrame("Button", nil, frame)

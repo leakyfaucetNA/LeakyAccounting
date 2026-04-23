@@ -17,6 +17,8 @@ local MIN_COL_W = 30
 local HEADER_H  = 22
 local GRIP_W    = 4
 local SEARCH_H  = 24
+local HSCROLL_H = 12
+local TOTALS_H  = 28
 
 -- -------------------------------------------------- --
 --  Session state                                     --
@@ -70,9 +72,9 @@ local function buildColumns(scope)
         sortVal = function(t) return t.kind or "" end,
     }
     add {
-        key = "source", label = "Source", w = 64,
-        render  = function(t) return t.source or "", T.C_DIM end,
-        sortVal = function(t) return t.source or "" end,
+        key = "source", label = "Source", w = 96,
+        render  = function(t) return ns.FormatSource(t.source), T.C_DIM end,
+        sortVal = function(t) return ns.FormatSource(t.source):lower() end,
     }
     add {
         key = "item", label = "Item", w = 220,
@@ -118,6 +120,7 @@ local function filterTxns(txns, query)
             t.itemLink and stripLink(t.itemLink) or "",
             t.otherPlayer or "",
             t.source or "",
+            ns.FormatSource(t.source),
             t.kind or "",
             t._char or "",
             date("%m/%d", t.t),
@@ -169,7 +172,43 @@ local function layoutHeaderAndRows(layout)
         grip:SetSize(GRIP_W, HEADER_H)
         x = x + w + COL_PAD
     end
-    layout.content:SetWidth(math.max(x, layout.scroll:GetWidth()))
+
+    -- Total column width; header & content share this width so the rows
+    -- line up with the header as they scroll horizontally.
+    local visibleW = layout.scroll:GetWidth()
+    if visibleW <= 0 then visibleW = 1 end
+    local contentW = math.max(x, visibleW)
+    layout.header:SetWidth(contentW)
+    layout.content:SetWidth(contentW)
+
+    -- Horizontal scrollbar range
+    local maxScroll = math.max(0, contentW - visibleW)
+    layout.hscroll:SetMinMaxValues(0, maxScroll)
+    if maxScroll <= 0 then
+        layout.hscroll:SetValue(0)
+        layout.hscroll:Hide()
+        layout.scroll:SetHorizontalScroll(0)
+        layout.headerScroll:SetHorizontalScroll(0)
+    else
+        layout.hscroll:Show()
+        local cur = layout.hscroll:GetValue()
+        if cur > maxScroll then layout.hscroll:SetValue(maxScroll) end
+    end
+
+    -- Vertical scrollbar range (content height set by RenderItemized)
+    local visibleH = layout.scroll:GetHeight()
+    local contentH = layout.content:GetHeight()
+    local maxV = math.max(0, contentH - visibleH)
+    layout.vscroll:SetMinMaxValues(0, maxV)
+    if maxV <= 0 then
+        layout.vscroll:SetValue(0)
+        layout.vscroll:Hide()
+        layout.scroll:SetVerticalScroll(0)
+    else
+        layout.vscroll:Show()
+        local curV = layout.vscroll:GetValue()
+        if curV > maxV then layout.vscroll:SetValue(maxV) end
+    end
 
     for _, row in ipairs(layout.rows) do
         if row:IsShown() then
@@ -346,10 +385,13 @@ end
 -- -------------------------------------------------- --
 
 local function destroyLayout(layout)
-    if layout.header  then layout.header:Hide();  layout.header:SetParent(nil)  end
-    if layout.scroll  then layout.scroll:Hide();  layout.scroll:SetParent(nil)  end
-    if layout.search  then layout.search:Hide();  layout.search:SetParent(nil)  end
-    if layout.searchLbl then layout.searchLbl:Hide() end
+    if layout.headerScroll then layout.headerScroll:Hide(); layout.headerScroll:SetParent(nil) end
+    if layout.scroll       then layout.scroll:Hide();       layout.scroll:SetParent(nil)       end
+    if layout.hscroll      then layout.hscroll:Hide();      layout.hscroll:SetParent(nil)      end
+    if layout.vscroll      then layout.vscroll:Hide();      layout.vscroll:SetParent(nil)      end
+    if layout.totalsStrip  then layout.totalsStrip:Hide(); layout.totalsStrip:SetParent(nil)   end
+    if layout.search       then layout.search:Hide();       layout.search:SetParent(nil)       end
+    if layout.searchLbl    then layout.searchLbl:Hide()                                         end
 end
 
 local function ensureLayout(parent, scope)
@@ -384,11 +426,16 @@ local function ensureLayout(parent, scope)
     layout.search    = search
     layout.searchLbl = search.label
 
-    -- Header
-    local header = ns.MakePanel(parent, T.C_ELEM, T.C_BDR)
-    header:SetPoint("TOPLEFT",  T.PAD, -(T.PAD + SEARCH_H + 4))
-    header:SetPoint("TOPRIGHT", -T.PAD, -(T.PAD + SEARCH_H + 4))
-    header:SetHeight(HEADER_H)
+    -- Header scroll: clips the header horizontally so cells can't overflow.
+    local headerScroll = CreateFrame("ScrollFrame", nil, parent)
+    headerScroll:SetPoint("TOPLEFT",  T.PAD, -(T.PAD + SEARCH_H + 4))
+    headerScroll:SetPoint("TOPRIGHT", -(T.PAD + HSCROLL_H + 2), -(T.PAD + SEARCH_H + 4))
+    headerScroll:SetHeight(HEADER_H)
+    layout.headerScroll = headerScroll
+
+    local header = ns.MakePanel(headerScroll, T.C_ELEM, T.C_BDR)
+    header:SetSize(1, HEADER_H)
+    headerScroll:SetScrollChild(header)
     layout.header = header
 
     local function onHeaderClick(col)
@@ -416,16 +463,101 @@ local function ensureLayout(parent, scope)
         layout.grips[col.key] = grip
     end
 
-    -- Scroll frame + content
-    local scroll = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT",     T.PAD, -(T.PAD + SEARCH_H + 4 + HEADER_H + 2))
-    scroll:SetPoint("BOTTOMRIGHT", -(T.PAD + 20), T.PAD)
+    -- Vertical scroll frame + content (no built-in scrollbar — we draw our own)
+    local BOTTOM_INSET = T.PAD + TOTALS_H + 2 + HSCROLL_H + 2
+    local scroll = CreateFrame("ScrollFrame", nil, parent)
+    scroll:SetPoint("TOPLEFT",     T.PAD,                    -(T.PAD + SEARCH_H + 4 + HEADER_H + 2))
+    scroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), BOTTOM_INSET)
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(1, 1)
     scroll:SetScrollChild(content)
-    scroll:SetScript("OnSizeChanged", function(_, w) content:SetWidth(math.max(w, 1)) end)
+    scroll:SetScript("OnSizeChanged", function() layoutHeaderAndRows(layout) end)
     layout.scroll  = scroll
     layout.content = content
+
+    -- Helper: builds a slider styled to match our panels (dark track, blue
+    -- accent thumb). Used for both the vertical and horizontal scrollbars
+    -- so they share the same look.
+    local function makeScrollbar(orientation)
+        local s = CreateFrame("Slider", nil, parent, "BackdropTemplate")
+        s:SetOrientation(orientation)
+        if orientation == "HORIZONTAL" then
+            s:SetHeight(HSCROLL_H)
+        else
+            s:SetWidth(HSCROLL_H)
+        end
+        ns.SetBD(s, T.C_ELEM, T.C_BDR)
+        local thumb = s:CreateTexture(nil, "OVERLAY")
+        thumb:SetTexture(T.TEX)
+        if orientation == "HORIZONTAL" then
+            thumb:SetSize(40, HSCROLL_H - 4)
+        else
+            thumb:SetSize(HSCROLL_H - 4, 40)
+        end
+        thumb:SetVertexColor(unpack(T.C_ACCENT))
+        s:SetThumbTexture(thumb)
+        s:SetMinMaxValues(0, 0)
+        s:SetValueStep(1)
+        s:SetObeyStepOnDrag(false)
+        s:SetValue(0)
+        s:Hide()
+        return s
+    end
+
+    -- Vertical scrollbar (drives the content's vertical scroll)
+    local vscroll = makeScrollbar("VERTICAL")
+    vscroll:SetPoint("TOPRIGHT",    -T.PAD, -(T.PAD + SEARCH_H + 4 + HEADER_H + 2))
+    vscroll:SetPoint("BOTTOMRIGHT", -T.PAD, BOTTOM_INSET)
+    vscroll:SetScript("OnValueChanged", function(_, value)
+        scroll:SetVerticalScroll(value)
+    end)
+    layout.vscroll = vscroll
+
+    -- Mouse wheel on the scroll frame drives the vertical slider.
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(_, delta)
+        local _, maxV = vscroll:GetMinMaxValues()
+        if maxV <= 0 then return end
+        local new = vscroll:GetValue() - delta * ROW_H * 3
+        if new < 0       then new = 0 end
+        if new > maxV    then new = maxV end
+        vscroll:SetValue(new)
+    end)
+
+    -- Horizontal scrollbar (drives both header and content)
+    local hscroll = makeScrollbar("HORIZONTAL")
+    hscroll:SetPoint("BOTTOMLEFT",  T.PAD,                    T.PAD + TOTALS_H + 2)
+    hscroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), T.PAD + TOTALS_H + 2)
+    hscroll:SetScript("OnValueChanged", function(_, value)
+        scroll:SetHorizontalScroll(value)
+        headerScroll:SetHorizontalScroll(value)
+    end)
+    layout.hscroll = hscroll
+
+    -- Totals strip: Earned / Spent / Net, computed from the currently
+    -- visible (filtered) rows each render.
+    local totalsStrip = ns.MakePanel(parent, T.C_PANEL, T.C_BDR)
+    totalsStrip:SetPoint("BOTTOMLEFT",  T.PAD, T.PAD)
+    totalsStrip:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD)
+    totalsStrip:SetHeight(TOTALS_H)
+
+    local earnedLbl = ns.MakeLabel(totalsStrip, "Total Earned:", 12, T.C_DIM)
+    earnedLbl:SetPoint("LEFT", 12, 0)
+    local earnedVal = ns.MakeLabel(totalsStrip, "", 12, T.C_GOOD)
+    earnedVal:SetPoint("LEFT", earnedLbl, "RIGHT", 6, 0)
+
+    local spentLbl = ns.MakeLabel(totalsStrip, "Total Spent:", 12, T.C_DIM)
+    spentLbl:SetPoint("LEFT", earnedVal, "RIGHT", 20, 0)
+    local spentVal = ns.MakeLabel(totalsStrip, "", 12, T.C_BAD)
+    spentVal:SetPoint("LEFT", spentLbl, "RIGHT", 6, 0)
+
+    local netLbl = ns.MakeLabel(totalsStrip, "Net:", 12, T.C_DIM)
+    netLbl:SetPoint("LEFT", spentVal, "RIGHT", 20, 0)
+    local netVal = ns.MakeLabel(totalsStrip, "", 12, T.C_TEXT)
+    netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
+
+    layout.totalsStrip = totalsStrip
+    layout.totals = { earned = earnedVal, spent = spentVal, net = netVal }
 
     return layout
 end
@@ -445,6 +577,19 @@ function ns.RenderItemized(parent, scope)
     local txns = ns.CollectTxns(scope)
     txns = filterTxns(txns, state.search)
     sortTxns(txns, layout.cols, state.sortKey, state.sortDir)
+
+    -- Totals over whatever is currently shown (i.e. post-filter).
+    local earned, spent = 0, 0
+    for _, t in ipairs(txns) do
+        local v = (t.qty or 1) * (t.unitPrice or 0)
+        if     t.kind == "sell" then earned = earned + v
+        elseif t.kind == "buy"  then spent  = spent  + v end
+    end
+    local net = earned - spent
+    layout.totals.earned:SetText(ns.FormatMoney(earned))
+    layout.totals.spent:SetText(ns.FormatMoney(spent))
+    layout.totals.net:SetText(ns.FormatMoney(net))
+    layout.totals.net:SetTextColor(unpack(net >= 0 and T.C_GOOD or T.C_BAD))
 
     for _, r in ipairs(layout.rows) do r:Hide() end
 
@@ -471,6 +616,6 @@ function ns.RenderItemized(parent, scope)
         fillRow(row, layout.cols, txn)
     end
 
-    layoutHeaderAndRows(layout)  -- reposition new rows' cells
     layout.content:SetHeight(#txns * ROW_H)
+    layoutHeaderAndRows(layout)  -- reposition new rows' cells + update scrollbar ranges
 end

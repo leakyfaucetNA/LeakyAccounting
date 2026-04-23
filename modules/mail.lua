@@ -15,8 +15,11 @@ local _, ns = ...
 --     all retries are exhausted — otherwise the mail slot can rotate away
 --     while we're still waiting for the server.
 
-local MAX_RETRIES  = 5
-local RETRY_DELAY  = 0.2
+local MAX_RETRIES      = 5
+local RETRY_DELAY      = 0.2
+-- After this many attempts, stop retrying for a missing player name and
+-- record with "?" as the buyer/seller. Matches TSM's `attempt <= 2` logic.
+local NAME_RETRY_LIMIT = 2
 
 -- -------------------------------------------------- --
 --  Subject patterns (lazy-init — globals set on load)--
@@ -58,28 +61,48 @@ end
 -- -------------------------------------------------- --
 
 -- Returns (success:bool, shouldRetry:bool). success=true ends retries; false
--- with shouldRetry=true schedules another attempt.
-local function recordMail(index)
-    if type(index) ~= "number" or index < 1 then return true end
+-- with shouldRetry=true schedules another attempt. `tries` is 1-based.
+local function recordMail(index, tries)
+    if type(index) ~= "number" or index < 1 then
+        ns.lpmsg("mail: recordMail bad index=" .. tostring(index), "DEBUG")
+        return true
+    end
 
     local _, _, sender, subject, money, cod, daysLeft, hasItem = GetInboxHeaderInfo(index)
-    if not subject then return true end
+    if not subject then
+        ns.lpmsg("mail: recordMail try=" .. tries .. " idx=" .. index .. " no subject yet", "DEBUG")
+        return false, true
+    end
     money = money or 0
     cod   = cod   or 0
 
     local id = mailId(sender, subject, money, daysLeft)
-    if taken[id] then return true end
+    if taken[id] then
+        ns.lpmsg("mail: recordMail idx=" .. index .. " already taken: " .. id, "DEBUG")
+        return true
+    end
 
     -- Classify via invoice first (TSM's approach).
     -- Returns: invoiceType, itemName, playerName, bid, buyout, deposit,
     --          consignment, moneyDelay, etaHour, etaMin, count
     local invoiceType, invItemName, invPlayer, invBid, _, _, _, _, _, _, invCount = GetInboxInvoiceInfo(index)
 
+    ns.lpmsg(string.format(
+        "mail: try=%d idx=%d subj=%q sender=%q money=%d cod=%d hasItem=%s invType=%s invItem=%q invPlayer=%q invBid=%s invCount=%s",
+        tries, index, tostring(subject), tostring(sender), money, cod, tostring(hasItem),
+        tostring(invoiceType), tostring(invItemName or ""), tostring(invPlayer or ""),
+        tostring(invBid), tostring(invCount)), "DEBUG")
+
     if invoiceType == "seller" then
         -- AH sale — money in header already = bid - ahcut (proceeds).
-        -- Retry while itemName or buyer hasn't populated.
-        if not invItemName or invItemName == "" then return false, true end
-        if not invPlayer   or invPlayer   == "" then return false, true end
+        if not invItemName or invItemName == "" then
+            if tries <= NAME_RETRY_LIMIT then return false, true end
+            invItemName = "Unknown auction item"
+        end
+        if not invPlayer or invPlayer == "" then
+            if tries <= NAME_RETRY_LIMIT then return false, true end
+            invPlayer = "?"  -- match TSM fallback after giving up on seller-name resolution
+        end
         local qty = (invCount and invCount > 0) and invCount or 1
         ns.RecordTxn("sell", "auction", {
             itemName    = invItemName,
@@ -92,7 +115,10 @@ local function recordMail(index)
 
     elseif invoiceType == "buyer" then
         -- AH purchase — bid is total paid.
-        if not invItemName or invItemName == "" then return false, true end
+        if not invItemName or invItemName == "" then
+            if tries <= NAME_RETRY_LIMIT then return false, true end
+            invItemName = "Unknown auction item"
+        end
         local itemLink = hasItem and GetInboxItemLink(index, 1) or nil
         local qty      = (invCount and invCount > 0) and invCount or 1
         local price    = (invBid and invBid > 0) and math.floor(invBid / qty) or 0
@@ -101,14 +127,16 @@ local function recordMail(index)
             itemName    = (not itemLink) and invItemName or nil,
             qty         = qty,
             unitPrice   = price,
-            otherPlayer = invPlayer or "Auction House",
+            otherPlayer = (invPlayer and invPlayer ~= "") and invPlayer or "Auction House",
         })
         taken[id] = true
         return true
 
     elseif invoiceType == "seller_temp_invoice" then
-        -- Not finalized yet
-        return false, true
+        -- Not finalized yet — keep retrying within budget
+        if tries <= MAX_RETRIES then return false, true end
+        ns.lpmsg("mail: seller_temp_invoice never finalized for idx=" .. index, "DEBUG")
+        return true
     end
 
     -- No invoice — check for non-invoice AH mails (expired / removed / outbid)
@@ -142,6 +170,7 @@ local function recordMail(index)
     end
 
     -- Unknown / item-only mail from another player — ignore (not money-related)
+    ns.lpmsg("mail: idx=" .. index .. " no handler matched — ignoring", "DEBUG")
     return true
 end
 
@@ -149,11 +178,12 @@ end
 --  Pre-hook dispatcher with retry                    --
 -- -------------------------------------------------- --
 
-local function attempt(origFn, index, subIndex, tries)
-    local success, shouldRetry = recordMail(index)
+local function attempt(origFn, fnName, index, subIndex, tries)
+    local success, shouldRetry = recordMail(index, tries)
     if not success and shouldRetry and tries < MAX_RETRIES then
+        ns.lpmsg(string.format("mail: %s idx=%s retry #%d", fnName, tostring(index), tries), "DEBUG")
         C_Timer.After(RETRY_DELAY, function()
-            attempt(origFn, index, subIndex, tries + 1)
+            attempt(origFn, fnName, index, subIndex, tries + 1)
         end)
     else
         origFn(index, subIndex)
@@ -167,18 +197,21 @@ end
 function ns.MailOnLoad()
     local origTakeMoney = TakeInboxMoney
     TakeInboxMoney = function(index, subIndex)
-        attempt(origTakeMoney, index, subIndex, 1)
+        ns.lpmsg("mail: TakeInboxMoney fired idx=" .. tostring(index), "DEBUG")
+        attempt(origTakeMoney, "TakeInboxMoney", index, subIndex, 1)
     end
 
     local origTakeItem = TakeInboxItem
     TakeInboxItem = function(index, subIndex)
-        attempt(origTakeItem, index, subIndex, 1)
+        ns.lpmsg("mail: TakeInboxItem fired idx=" .. tostring(index) .. " sub=" .. tostring(subIndex), "DEBUG")
+        attempt(origTakeItem, "TakeInboxItem", index, subIndex, 1)
     end
 
     local origAutoLoot = AutoLootMailItem
     AutoLootMailItem = function(index, subIndex)
-        attempt(origAutoLoot, index, subIndex, 1)
+        ns.lpmsg("mail: AutoLootMailItem fired idx=" .. tostring(index), "DEBUG")
+        attempt(origAutoLoot, "AutoLootMailItem", index, subIndex, 1)
     end
 
-    ns.lpmsg("Mail tracking armed.", "DEBUG")
+    ns.lpmsg("Mail tracking armed.")
 end

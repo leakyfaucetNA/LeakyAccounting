@@ -137,6 +137,8 @@ local function build()
     SetBD(frame, C_BG, C_BDR)
     frame:SetFrameStrata("HIGH")
     frame:SetMovable(true)
+    frame:SetResizable(true)
+    frame:SetResizeBounds(520, 320)
     frame:EnableMouse(true)
     frame:SetClampedToScreen(true)
     frame:Hide()
@@ -193,6 +195,25 @@ local function build()
     itemizedContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
     itemizedContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
 
+    -- Bottom-right resize grip
+    local grip = CreateFrame("Button", nil, frame)
+    grip:SetSize(16, 16)
+    grip:SetPoint("BOTTOMRIGHT", -2, 2)
+    grip:SetFrameLevel(frame:GetFrameLevel() + 10)
+    grip:EnableMouse(true)
+    local gripTex = grip:CreateTexture(nil, "OVERLAY")
+    gripTex:SetTexture(TEX)
+    gripTex:SetAllPoints(grip)
+    gripTex:SetVertexColor(unpack(C_BDR))
+    grip:SetScript("OnEnter", function() gripTex:SetVertexColor(unpack(C_ACCENT)) end)
+    grip:SetScript("OnLeave", function() gripTex:SetVertexColor(unpack(C_BDR))    end)
+    grip:SetScript("OnMouseDown", function(_, button)
+        if button == "LeftButton" then frame:StartSizing("BOTTOMRIGHT") end
+    end)
+    grip:SetScript("OnMouseUp", function() frame:StopMovingOrSizing() end)
+
+    -- Re-render active tab when the frame is resized
+    frame:SetScript("OnSizeChanged", function() refresh() end)
     frame:SetScript("OnShow", refresh)
     return frame
 end

@@ -1,6 +1,28 @@
 local _, ns = ...
 
 -- -------------------------------------------------- --
+--  Source label display                              --
+-- -------------------------------------------------- --
+
+-- Raw internal source values (stored in the DB) → friendly UI labels.
+-- Keep the raw values stable — they're persisted in saved variables and
+-- used as sort/filter keys.
+local SOURCE_LABELS = {
+    ["vendor"]         = "Vendor",
+    ["auction"]        = "Auction",
+    ["trade"]          = "Trade",
+    ["repair"]         = "Repair",
+    ["mail-received"]  = "Mail",
+    ["trade-pay"]      = "Trade",
+    ["trade-receive"]  = "Trade",
+}
+
+function ns.FormatSource(src)
+    if not src then return "" end
+    return SOURCE_LABELS[src] or src:gsub("^%l", string.upper)
+end
+
+-- -------------------------------------------------- --
 --  Character bookkeeping                             --
 -- -------------------------------------------------- --
 
@@ -120,12 +142,14 @@ end
 
 -- scope: "char" | "account"
 -- Returns a flat array of lightweight view-rows (not the stored records)
--- sorted by time desc. Each row has the same fields as the transaction plus
--- a `_char` hint used by the itemized tab's account view. Not writing to
--- the stored record keeps `_char` out of saved variables.
+-- sorted by time desc. Includes both transactions[] (items) and money[]
+-- (gold events like repairs, plain mail gold, trade gold). Money rows are
+-- normalized into the same shape with itemName="Gold", qty=1, and the
+-- delta magnitude as unitPrice. Not mutating stored records keeps `_char`
+-- and other transient fields out of saved variables.
 function ns.CollectTxns(scope)
     local out = {}
-    local function push(txn, charName)
+    local function pushTxn(txn, charName)
         out[#out + 1] = {
             t           = txn.t,
             kind        = txn.kind,
@@ -139,15 +163,27 @@ function ns.CollectTxns(scope)
             _char       = charName,
         }
     end
+    local function pushMoney(m, charName)
+        out[#out + 1] = {
+            t           = m.t,
+            kind        = (m.delta or 0) >= 0 and "sell" or "buy",
+            source      = m.reason or "unknown",
+            itemName    = "Gold",
+            qty         = 1,
+            unitPrice   = math.abs(m.delta or 0),
+            otherPlayer = m.otherPlayer,
+            _char       = charName,
+        }
+    end
+    local function foldBucket(bucket)
+        for _, t in ipairs(bucket.transactions or {}) do pushTxn(t, bucket.name) end
+        for _, m in ipairs(bucket.money        or {}) do pushMoney(m, bucket.name) end
+    end
     if scope == "account" then
-        for _, bucket in ns.IterCharacters() do
-            for _, t in ipairs(bucket.transactions) do push(t, bucket.name) end
-        end
+        for _, b in ns.IterCharacters() do foldBucket(b) end
     else
-        local bucket = ns.GetCharBucket()
-        if bucket then
-            for _, t in ipairs(bucket.transactions) do push(t, bucket.name) end
-        end
+        local b = ns.GetCharBucket()
+        if b then foldBucket(b) end
     end
     table.sort(out, function(a, b) return a.t > b.t end)
     return out

@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build zip
+        run: |
+          git archive \
+            --format=zip \
+            --prefix=LeakyAccounting/ \
+            -o LeakyAccounting-${{ github.ref_name }}.zip \
+            HEAD
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: LeakyAccounting-*.zip
+          generate_release_notes: true

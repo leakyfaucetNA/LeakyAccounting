@@ -92,10 +92,41 @@ local function setTabState(btn, active)
     end
 end
 
-ns.MakePanel  = MakePanel
-ns.MakeLabel  = MakeLabel
-ns.MakeButton = MakeButton
-ns.SetBD      = SetBD
+-- Styled Slider used for both horizontal and vertical scrollbars so every
+-- panel that needs scrolling shares the same dark-track / blue-thumb look.
+local SCROLLBAR_W = 12
+local function MakeScrollbar(parent, orientation)
+    local s = CreateFrame("Slider", nil, parent, "BackdropTemplate")
+    s:SetOrientation(orientation)
+    if orientation == "HORIZONTAL" then
+        s:SetHeight(SCROLLBAR_W)
+    else
+        s:SetWidth(SCROLLBAR_W)
+    end
+    SetBD(s, C_ELEM, C_BDR)
+    local thumb = s:CreateTexture(nil, "OVERLAY")
+    thumb:SetTexture(TEX)
+    if orientation == "HORIZONTAL" then
+        thumb:SetSize(40, SCROLLBAR_W - 4)
+    else
+        thumb:SetSize(SCROLLBAR_W - 4, 40)
+    end
+    thumb:SetVertexColor(unpack(C_ACCENT))
+    s:SetThumbTexture(thumb)
+    s:SetMinMaxValues(0, 0)
+    s:SetValueStep(1)
+    s:SetObeyStepOnDrag(false)
+    s:SetValue(0)
+    s:Hide()
+    return s
+end
+
+ns.MakePanel     = MakePanel
+ns.MakeLabel     = MakeLabel
+ns.MakeButton    = MakeButton
+ns.MakeScrollbar = MakeScrollbar
+ns.SetBD         = SetBD
+ns.SCROLLBAR_W   = SCROLLBAR_W
 
 -- -------------------------------------------------- --
 --  Main frame                                        --
@@ -104,22 +135,24 @@ ns.SetBD      = SetBD
 local frame
 local activeTab = "chart"
 local scope     = "char"  -- "char" | "account"
-local chartContent, itemizedContent, charactersContent
-local chartBtn, itemizedBtn, charactersBtn
+local chartContent, itemizedContent, charactersContent, settingsContent
+local chartBtn, itemizedBtn, charactersBtn, settingsBtn
 local scopeCharBtn, scopeAccountBtn, scopeLbl
 
 local function refresh()
     chartContent:SetShown(activeTab == "chart")
     itemizedContent:SetShown(activeTab == "itemized")
     charactersContent:SetShown(activeTab == "characters")
+    settingsContent:SetShown(activeTab == "settings")
     setTabState(chartBtn,      activeTab == "chart")
     setTabState(itemizedBtn,   activeTab == "itemized")
     setTabState(charactersBtn, activeTab == "characters")
+    setTabState(settingsBtn,   activeTab == "settings")
     setTabState(scopeCharBtn,    scope == "char")
     setTabState(scopeAccountBtn, scope == "account")
 
-    -- Scope toggle is meaningless on the Characters tab (always all chars).
-    local showScope = activeTab ~= "characters"
+    -- Scope toggle only applies to tabs that can render per-char vs account.
+    local showScope = (activeTab == "chart") or (activeTab == "itemized")
     scopeLbl:SetShown(showScope)
     scopeCharBtn:SetShown(showScope)
     scopeAccountBtn:SetShown(showScope)
@@ -130,6 +163,8 @@ local function refresh()
         ns.RenderItemized(itemizedContent, scope)
     elseif activeTab == "characters" and ns.RenderCharacters then
         ns.RenderCharacters(charactersContent)
+    elseif activeTab == "settings" and ns.RenderSettings then
+        ns.RenderSettings(settingsContent)
     end
 end
 
@@ -152,6 +187,11 @@ local function build()
     frame:EnableMouse(true)
     frame:SetClampedToScreen(true)
     frame:Hide()
+
+    -- Closing on Escape: the standard WoW pattern is to add the frame's
+    -- global name to UISpecialFrames. The UI then hides the first visible
+    -- entry in that list before opening the game menu.
+    tinsert(UISpecialFrames, "LeakyAccountingFrame")
 
     -- Title bar
     local title = MakePanel(frame, C_PANEL, C_BDR)
@@ -188,6 +228,10 @@ local function build()
     charactersBtn:SetPoint("LEFT", itemizedBtn, "RIGHT", 6, 0)
     charactersBtn:SetScript("OnClick", function() activeTab = "characters" refresh() end)
 
+    settingsBtn = MakeButton(tabBar, "Settings", 80, 22)
+    settingsBtn:SetPoint("LEFT", charactersBtn, "RIGHT", 6, 0)
+    settingsBtn:SetScript("OnClick", function() activeTab = "settings" refresh() end)
+
     -- Scope toggle (right side)
     scopeLbl = MakeLabel(tabBar, "Scope:", 12, C_DIM)
     scopeAccountBtn = MakeButton(tabBar, "Account", 80, 22)
@@ -213,6 +257,10 @@ local function build()
     charactersContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
     charactersContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
 
+    settingsContent = MakePanel(frame, C_PANEL, C_BDR)
+    settingsContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
+    settingsContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
+
     -- Bottom-right resize grip
     local grip = CreateFrame("Button", nil, frame)
     grip:SetSize(16, 16)
@@ -233,6 +281,19 @@ local function build()
     -- Re-render active tab when the frame is resized
     frame:SetScript("OnSizeChanged", function() refresh() end)
     frame:SetScript("OnShow", refresh)
+
+    -- When the frame hides, belt-and-suspenders-Hide the tab content panels
+    -- so any scroll / slider descendants follow (a few Slider children in
+    -- retail don't reliably cascade-hide via parent visibility alone).
+    -- Also hide GameTooltip so hover state doesn't leave it floating.
+    frame:SetScript("OnHide", function()
+        GameTooltip:Hide()
+        if chartContent      then chartContent:Hide()      end
+        if itemizedContent   then itemizedContent:Hide()   end
+        if charactersContent then charactersContent:Hide() end
+        if settingsContent   then settingsContent:Hide()   end
+    end)
+
     return frame
 end
 

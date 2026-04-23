@@ -40,7 +40,8 @@ local defaults = {
         characters    = {},
     },
     profile = {
-        debug = false,
+        debug       = false,
+        windowDays  = 7,   -- "Last N days" window used by the chart totals
     },
 }
 

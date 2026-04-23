@@ -15,7 +15,7 @@ local function ensurePlotArea(parent)
 
     T = ns.theme
 
-    local STRIP_H    = 64  -- two rows (session + total)
+    local STRIP_H    = 92  -- three rows: session, last-N-days, total
     local TOPBAR_H   = 26  -- "Current Gold" label strip
 
     -- Top bar: shows current gold. Hover opens a tooltip listing per-char
@@ -92,8 +92,10 @@ local function ensurePlotArea(parent)
     local function buildRow(title, yOff)
         local head = ns.MakeLabel(strip, title, 12, T.C_ACCENT)
         head:SetPoint("TOPLEFT", 12, yOff)
+        head:SetWidth(110)  -- fixed width so Earned: aligns across rows
+        head:SetJustifyH("LEFT")
         local earnedLbl = ns.MakeLabel(strip, "Earned:", 12, T.C_DIM)
-        earnedLbl:SetPoint("LEFT", head, "RIGHT", 10, 0)
+        earnedLbl:SetPoint("LEFT", head, "RIGHT", 0, 0)
         local earnedVal = ns.MakeLabel(strip, "", 12, T.C_GOOD)
         earnedVal:SetPoint("LEFT", earnedLbl, "RIGHT", 6, 0)
 
@@ -107,12 +109,13 @@ local function ensurePlotArea(parent)
         local netVal = ns.MakeLabel(strip, "", 12, T.C_TEXT)
         netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
 
-        return { earned = earnedVal, spend = spendVal, net = netVal }
+        return { title = head, earned = earnedVal, spend = spendVal, net = netVal }
     end
 
     parent._totals = {
-        session = buildRow("Session", -6),
-        total   = buildRow("Total",   -34),
+        session = buildRow("Session",     -6),
+        window  = buildRow("Last N days", -34),
+        total   = buildRow("Total",       -62),
     }
 
     return plot
@@ -218,6 +221,12 @@ function ns.RenderChart(parent, scope)
     local income,  spend,  net  = ns.CollectTotals(scope)
     local sIncome, sSpend, sNet = ns.CollectTotalsSince(scope, ns.sessionStart)
 
+    -- "Last N days" window from settings; falls back to 7 if the profile
+    -- hasn't loaded a value yet.
+    local windowDays = (ns.addon.db and ns.addon.db.profile and ns.addon.db.profile.windowDays) or 7
+    local windowSince = time() - windowDays * 86400
+    local wIncome, wSpend, wNet = ns.CollectTotalsSince(scope, windowSince)
+
     local function fillRow(row, earned, spent, netv)
         row.earned:SetText(ns.FormatMoney(earned))
         row.spend:SetText(ns.FormatMoney(spent))
@@ -225,7 +234,10 @@ function ns.RenderChart(parent, scope)
         row.net:SetTextColor(unpack(netv >= 0 and T.C_GOOD or T.C_BAD))
     end
     fillRow(totals.session, sIncome, sSpend, sNet)
-    fillRow(totals.total,   income,  spend,  net)
+    totals.window.title:SetText(string.format("Last %d %s",
+        windowDays, windowDays == 1 and "day" or "days"))
+    fillRow(totals.window, wIncome, wSpend, wNet)
+    fillRow(totals.total,  income,  spend,  net)
 
     -- Empty-state
     if #log < 2 then

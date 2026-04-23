@@ -575,37 +575,8 @@ local function ensureLayout(parent, scope)
     layout.scroll  = scroll
     layout.content = content
 
-    -- Helper: builds a slider styled to match our panels (dark track, blue
-    -- accent thumb). Used for both the vertical and horizontal scrollbars
-    -- so they share the same look.
-    local function makeScrollbar(orientation)
-        local s = CreateFrame("Slider", nil, parent, "BackdropTemplate")
-        s:SetOrientation(orientation)
-        if orientation == "HORIZONTAL" then
-            s:SetHeight(HSCROLL_H)
-        else
-            s:SetWidth(HSCROLL_H)
-        end
-        ns.SetBD(s, T.C_ELEM, T.C_BDR)
-        local thumb = s:CreateTexture(nil, "OVERLAY")
-        thumb:SetTexture(T.TEX)
-        if orientation == "HORIZONTAL" then
-            thumb:SetSize(40, HSCROLL_H - 4)
-        else
-            thumb:SetSize(HSCROLL_H - 4, 40)
-        end
-        thumb:SetVertexColor(unpack(T.C_ACCENT))
-        s:SetThumbTexture(thumb)
-        s:SetMinMaxValues(0, 0)
-        s:SetValueStep(1)
-        s:SetObeyStepOnDrag(false)
-        s:SetValue(0)
-        s:Hide()
-        return s
-    end
-
     -- Vertical scrollbar (drives the content's vertical scroll)
-    local vscroll = makeScrollbar("VERTICAL")
+    local vscroll = ns.MakeScrollbar(parent, "VERTICAL")
     vscroll:SetPoint("TOPRIGHT",    -T.PAD, -(T.PAD + SEARCH_H + 4 + HEADER_H + 2))
     vscroll:SetPoint("BOTTOMRIGHT", -T.PAD, BOTTOM_INSET)
     vscroll:SetScript("OnValueChanged", function(_, value)
@@ -625,7 +596,7 @@ local function ensureLayout(parent, scope)
     end)
 
     -- Horizontal scrollbar (drives both header and content)
-    local hscroll = makeScrollbar("HORIZONTAL")
+    local hscroll = ns.MakeScrollbar(parent, "HORIZONTAL")
     hscroll:SetPoint("BOTTOMLEFT",  T.PAD,                    T.PAD + TOTALS_H + 2)
     hscroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), T.PAD + TOTALS_H + 2)
     hscroll:SetScript("OnValueChanged", function(_, value)

@@ -116,16 +116,38 @@ local function ensureLayout(parent)
     layout.cols.delete:SetPoint("RIGHT", header, "RIGHT", -12, 0)
     layout.cols.delete:SetText("")
 
-    -- Scroll frame
-    local scroll = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
-    scroll:SetPoint("TOPLEFT",     T.PAD,       -(T.PAD + 26))
-    scroll:SetPoint("BOTTOMRIGHT", -(T.PAD + 20), T.PAD)
+    -- Scroll frame (plain, custom scrollbar below so the look matches the
+    -- Itemized tab: dark track, blue accent thumb).
+    local BAR = ns.SCROLLBAR_W
+    local scroll = CreateFrame("ScrollFrame", nil, parent)
+    scroll:SetPoint("TOPLEFT",     T.PAD,           -(T.PAD + 26))
+    scroll:SetPoint("BOTTOMRIGHT", -(T.PAD + BAR + 2), T.PAD)
     local content = CreateFrame("Frame", nil, scroll)
     content:SetSize(1, 1)
     scroll:SetScrollChild(content)
     scroll:SetScript("OnSizeChanged", function(_, w) content:SetWidth(math.max(w, 1)) end)
     layout.scroll  = scroll
     layout.content = content
+
+    -- Vertical scrollbar
+    local vscroll = ns.MakeScrollbar(parent, "VERTICAL")
+    vscroll:SetPoint("TOPRIGHT",    -T.PAD, -(T.PAD + 26))
+    vscroll:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD)
+    vscroll:SetScript("OnValueChanged", function(_, value)
+        scroll:SetVerticalScroll(value)
+    end)
+    layout.vscroll = vscroll
+
+    -- Mouse wheel drives the slider.
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(_, delta)
+        local _, maxV = vscroll:GetMinMaxValues()
+        if maxV <= 0 then return end
+        local new = vscroll:GetValue() - delta * ROW_H * 3
+        if new < 0 then new = 0 end
+        if new > maxV then new = maxV end
+        vscroll:SetValue(new)
+    end)
 
     return layout
 end
@@ -229,4 +251,20 @@ function ns.RenderCharacters(parent)
     end
 
     layout.content:SetHeight(#rows * ROW_H)
+
+    -- Keep the vertical scrollbar range in sync with content + viewport.
+    local viewH  = layout.scroll:GetHeight()
+    local contH  = layout.content:GetHeight()
+    local maxV   = math.max(0, contH - viewH)
+    layout.vscroll:SetMinMaxValues(0, maxV)
+    if maxV <= 0 then
+        layout.vscroll:SetValue(0)
+        layout.vscroll:Hide()
+        layout.scroll:SetVerticalScroll(0)
+    else
+        layout.vscroll:Show()
+        if layout.vscroll:GetValue() > maxV then
+            layout.vscroll:SetValue(maxV)
+        end
+    end
 end

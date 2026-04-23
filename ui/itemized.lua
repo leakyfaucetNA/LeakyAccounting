@@ -19,14 +19,15 @@ local GRIP_W    = 4
 local SEARCH_H  = 24
 local HSCROLL_H = 12
 local TOTALS_H  = 28
+local WINDOW_H  = 24
 
 -- -------------------------------------------------- --
 --  Session state                                     --
 -- -------------------------------------------------- --
 
 local session = {
-    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "" },
-    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "" },
+    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7 },
+    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7 },
 }
 
 -- -------------------------------------------------- --
@@ -162,23 +163,30 @@ end
 --  Filter / sort                                     --
 -- -------------------------------------------------- --
 
-local function filterTxns(txns, query)
-    if not query or query == "" then return txns end
-    local q = query:lower()
+local function filterTxns(txns, query, windowDays)
+    local q       = (query and query ~= "") and query:lower() or nil
+    local cutoff  = (windowDays and windowDays > 0) and (time() - windowDays * 86400) or nil
+    if not q and not cutoff then return txns end
+
     local out = {}
     for _, t in ipairs(txns) do
-        local hay = table.concat({
-            t.itemName or "",
-            t.itemLink and stripLink(t.itemLink) or "",
-            t.otherPlayer or "",
-            t.source or "",
-            ns.FormatSource(t.source),
-            t.kind or "",
-            t._char or "",
-            date("%m/%d", t.t),
-            date("%Y-%m-%d %H:%M", t.t),
-        }, " "):lower()
-        if hay:find(q, 1, true) then out[#out + 1] = t end
+        local pass = true
+        if cutoff and t.t and t.t < cutoff then pass = false end
+        if pass and q then
+            local hay = table.concat({
+                t.itemName or "",
+                t.itemLink and stripLink(t.itemLink) or "",
+                t.otherPlayer or "",
+                t.source or "",
+                ns.FormatSource(t.source),
+                t.kind or "",
+                t._char or "",
+                date("%m/%d", t.t),
+                date("%Y-%m-%d %H:%M", t.t),
+            }, " "):lower()
+            if not hay:find(q, 1, true) then pass = false end
+        end
+        if pass then out[#out + 1] = t end
     end
     return out
 end
@@ -490,6 +498,7 @@ local function destroyLayout(layout)
     if layout.hscroll      then layout.hscroll:Hide();      layout.hscroll:SetParent(nil)      end
     if layout.vscroll      then layout.vscroll:Hide();      layout.vscroll:SetParent(nil)      end
     if layout.totalsStrip  then layout.totalsStrip:Hide(); layout.totalsStrip:SetParent(nil)   end
+    if layout.windowRow    then layout.windowRow:Hide();    layout.windowRow:SetParent(nil)    end
     if layout.search       then layout.search:Hide();       layout.search:SetParent(nil)       end
     if layout.searchLbl    then layout.searchLbl:Hide()                                         end
 end
@@ -564,7 +573,7 @@ local function ensureLayout(parent, scope)
     end
 
     -- Vertical scroll frame + content (no built-in scrollbar — we draw our own)
-    local BOTTOM_INSET = T.PAD + TOTALS_H + 2 + HSCROLL_H + 2
+    local BOTTOM_INSET = T.PAD + TOTALS_H + 2 + WINDOW_H + 2 + HSCROLL_H + 2
     local scroll = CreateFrame("ScrollFrame", nil, parent)
     scroll:SetPoint("TOPLEFT",     T.PAD,                    -(T.PAD + SEARCH_H + 4 + HEADER_H + 2))
     scroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), BOTTOM_INSET)
@@ -597,8 +606,8 @@ local function ensureLayout(parent, scope)
 
     -- Horizontal scrollbar (drives both header and content)
     local hscroll = ns.MakeScrollbar(parent, "HORIZONTAL")
-    hscroll:SetPoint("BOTTOMLEFT",  T.PAD,                    T.PAD + TOTALS_H + 2)
-    hscroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), T.PAD + TOTALS_H + 2)
+    hscroll:SetPoint("BOTTOMLEFT",  T.PAD,                    T.PAD + TOTALS_H + 2 + WINDOW_H + 2)
+    hscroll:SetPoint("BOTTOMRIGHT", -(T.PAD + HSCROLL_H + 2), T.PAD + TOTALS_H + 2 + WINDOW_H + 2)
     hscroll:SetScript("OnValueChanged", function(_, value)
         scroll:SetHorizontalScroll(value)
         headerScroll:SetHorizontalScroll(value)
@@ -630,6 +639,53 @@ local function ensureLayout(parent, scope)
     layout.totalsStrip = totalsStrip
     layout.totals = { earned = earnedVal, spent = spentVal, net = netVal }
 
+    -- Window filter row: sits just above the totals strip. Independent of
+    -- the Settings-tab windowDays — each scope keeps its own live filter
+    -- value in the module's session table. Value of 0 disables the filter
+    -- (shows all rows).
+    local windowRow = ns.MakePanel(parent, T.C_PANEL, T.C_BDR)
+    windowRow:SetPoint("BOTTOMLEFT",  T.PAD, T.PAD + TOTALS_H + 2)
+    windowRow:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD + TOTALS_H + 2)
+    windowRow:SetHeight(WINDOW_H)
+
+    local wLbl = ns.MakeLabel(windowRow, "Window (days):", 12, T.C_DIM)
+    wLbl:SetPoint("LEFT", 12, 0)
+
+    local wHolder = CreateFrame("Frame", nil, windowRow, "BackdropTemplate")
+    ns.SetBD(wHolder, T.C_ELEM, T.C_BDR)
+    wHolder:SetSize(56, 18)
+    wHolder:SetPoint("LEFT", wLbl, "RIGHT", 8, 0)
+
+    local wEb = CreateFrame("EditBox", nil, wHolder)
+    wEb:SetPoint("TOPLEFT", 4, -2)
+    wEb:SetPoint("BOTTOMRIGHT", -4, 2)
+    wEb:SetAutoFocus(false)
+    wEb:SetFontObject("GameFontNormalSmall")
+    wEb:SetTextColor(unpack(T.C_TEXT))
+    wEb:SetNumeric(true)
+    wEb:SetMaxLetters(5)
+    wEb:SetScript("OnEscapePressed", wEb.ClearFocus)
+    wEb:SetText(tostring(state.windowDays or 7))
+
+    local wHint = ns.MakeLabel(windowRow, "0 = show all", 11, T.C_DIM)
+    wHint:SetPoint("LEFT", wHolder, "RIGHT", 8, 0)
+
+    local function applyWindow()
+        local n = tonumber(wEb:GetText() or "")
+        if not n or n < 0 then n = 0 end
+        if n > 36500 then n = 36500 end
+        state.windowDays = n
+        ns.RenderItemized(parent, scope)
+    end
+    wEb:SetScript("OnEnterPressed", function(self) applyWindow(); self:ClearFocus() end)
+    wEb:SetScript("OnEditFocusLost", applyWindow)
+    wEb:SetScript("OnTextChanged", function(_, userInput)
+        if userInput then applyWindow() end
+    end)
+
+    layout.windowRow  = windowRow
+    layout.windowEdit = wEb
+
     return layout
 end
 
@@ -646,7 +702,7 @@ function ns.RenderItemized(parent, scope)
     layoutHeaderAndRows(layout)
 
     local txns = ns.CollectTxns(scope)
-    txns = filterTxns(txns, state.search)
+    txns = filterTxns(txns, state.search, state.windowDays)
     sortTxns(txns, layout.cols, state.sortKey, state.sortDir)
 
     -- Totals over whatever is currently shown (i.e. post-filter).

@@ -307,3 +307,58 @@ function ns.FormatMoney(copper)
     if neg then str = "-" .. str end
     return str
 end
+
+-- -------------------------------------------------- --
+--  Reset helpers                                     --
+-- -------------------------------------------------- --
+
+-- Wipe all tracked data for the current character (transactions, money, log).
+-- The character bucket is removed; EnsureCharacter reseeds an empty one so
+-- new events logged immediately after the reset still have a place to land.
+function ns.ResetCurrentCharacter()
+    local key = ns.GetCharKey()
+    ns.addon.db.global.characters[key] = nil
+    ns.EnsureCharacter()
+    ns.lpmsg("Reset: cleared all data for " .. key)
+    if ns.OnDataChanged then ns.OnDataChanged() end
+end
+
+-- Wipe every character bucket. The current character is reseeded fresh.
+function ns.ResetAllCharacters()
+    wipe(ns.addon.db.global.characters)
+    ns.EnsureCharacter()
+    ns.lpmsg("Reset: cleared all data for every character")
+    if ns.OnDataChanged then ns.OnDataChanged() end
+end
+
+-- Trim every character's transactions / money / goldLog to entries strictly
+-- older than `days` days. Returns how many entries were removed in total.
+function ns.ResetLastDays(days)
+    if not days or days <= 0 then return 0 end
+    local cutoff = time() - days * 86400
+    local removed = 0
+    local function trim(list)
+        if not list then return list, 0 end
+        local out, drop = {}, 0
+        for _, e in ipairs(list) do
+            if e.t and e.t < cutoff then
+                out[#out + 1] = e
+            else
+                drop = drop + 1
+            end
+        end
+        return out, drop
+    end
+    for _, bucket in ns.IterCharacters() do
+        local newTxn, dropT = trim(bucket.transactions)
+        local newMny, dropM = trim(bucket.money)
+        local newGld, dropG = trim(bucket.goldLog)
+        bucket.transactions = newTxn
+        bucket.money        = newMny
+        bucket.goldLog      = newGld
+        removed = removed + dropT + dropM + dropG
+    end
+    ns.lpmsg(string.format("Reset: removed %d entries from the last %d day(s)", removed, days))
+    if ns.OnDataChanged then ns.OnDataChanged() end
+    return removed
+end

@@ -6,6 +6,11 @@ local _, ns = ...
 
 local T  -- ns.theme, bound lazily so it's always the current copy
 
+-- Session-scope state for the chart. windowDays drives the middle totals
+-- row ("Last N days"). Not tied to any saved setting — typing in the edit
+-- box live-updates the row; resets to 7 on /reload.
+local chartSession = { windowDays = 7 }
+
 -- -------------------------------------------------- --
 --  Plot-area helpers                                 --
 -- -------------------------------------------------- --
@@ -89,13 +94,14 @@ local function ensurePlotArea(parent)
     strip:SetPoint("BOTTOMRIGHT", -T.PAD, T.PAD)
     strip:SetHeight(STRIP_H)
 
-    local function buildRow(title, yOff)
-        local head = ns.MakeLabel(strip, title, 12, T.C_ACCENT)
-        head:SetPoint("TOPLEFT", 12, yOff)
-        head:SetWidth(110)  -- fixed width so Earned: aligns across rows
-        head:SetJustifyH("LEFT")
+    -- Fixed horizontal slot reserved for the title area so the Earned: /
+    -- Spent: / Net: columns align across rows even when the title is a
+    -- composite widget (e.g. the window row's "Last [#] days").
+    local TITLE_AREA_W = 110
+
+    local function buildValueCells(yOff)
         local earnedLbl = ns.MakeLabel(strip, "Earned:", 12, T.C_DIM)
-        earnedLbl:SetPoint("LEFT", head, "RIGHT", 0, 0)
+        earnedLbl:SetPoint("TOPLEFT", 12 + TITLE_AREA_W, yOff)
         local earnedVal = ns.MakeLabel(strip, "", 12, T.C_GOOD)
         earnedVal:SetPoint("LEFT", earnedLbl, "RIGHT", 6, 0)
 
@@ -109,13 +115,66 @@ local function ensurePlotArea(parent)
         local netVal = ns.MakeLabel(strip, "", 12, T.C_TEXT)
         netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
 
-        return { title = head, earned = earnedVal, spend = spendVal, net = netVal }
+        return { earned = earnedVal, spend = spendVal, net = netVal }
+    end
+
+    local function buildRow(title, yOff)
+        local head = ns.MakeLabel(strip, title, 12, T.C_ACCENT)
+        head:SetPoint("TOPLEFT", 12, yOff)
+        head:SetWidth(TITLE_AREA_W)
+        head:SetJustifyH("LEFT")
+        local cells = buildValueCells(yOff)
+        cells.title = head
+        return cells
+    end
+
+    -- The middle row is special — its title is "Last [#] days" with an
+    -- inline edit box. Typing live-updates via chartSession.windowDays.
+    local function buildWindowRow(yOff)
+        local lastLbl = ns.MakeLabel(strip, "Last", 12, T.C_ACCENT)
+        lastLbl:SetPoint("TOPLEFT", 12, yOff)
+
+        local holder = CreateFrame("Frame", nil, strip, "BackdropTemplate")
+        ns.SetBD(holder, T.C_ELEM, T.C_BDR)
+        holder:SetSize(40, 18)
+        holder:SetPoint("LEFT", lastLbl, "RIGHT", 4, 0)
+
+        local eb = CreateFrame("EditBox", nil, holder)
+        eb:SetPoint("TOPLEFT", 4, -1)
+        eb:SetPoint("BOTTOMRIGHT", -4, 1)
+        eb:SetAutoFocus(false)
+        eb:SetFontObject("GameFontNormalSmall")
+        eb:SetTextColor(unpack(T.C_TEXT))
+        eb:SetNumeric(true)
+        eb:SetMaxLetters(4)
+        eb:SetText(tostring(chartSession.windowDays or 7))
+        eb:SetScript("OnEscapePressed", eb.ClearFocus)
+
+        local daysLbl = ns.MakeLabel(strip, "days", 12, T.C_DIM)
+        daysLbl:SetPoint("LEFT", holder, "RIGHT", 4, 0)
+
+        local function commit(userInput)
+            local n = tonumber(eb:GetText() or "")
+            if not n or n < 0 then n = 0 end
+            if n > 36500 then n = 36500 end
+            chartSession.windowDays = n
+            if userInput and ns.OnDataChanged then ns.OnDataChanged() end
+        end
+        eb:SetScript("OnEnterPressed", function(self) commit(true); self:ClearFocus() end)
+        eb:SetScript("OnEditFocusLost", function() commit(true) end)
+        eb:SetScript("OnTextChanged", function(_, userInput)
+            if userInput then commit(true) end
+        end)
+
+        local cells = buildValueCells(yOff)
+        cells.edit = eb
+        return cells
     end
 
     parent._totals = {
-        session = buildRow("Session",     -6),
-        window  = buildRow("Last N days", -34),
-        total   = buildRow("Total",       -62),
+        session = buildRow("Session",  -6),
+        window  = buildWindowRow(-34),
+        total   = buildRow("Total",    -62),
     }
 
     return plot
@@ -221,11 +280,16 @@ function ns.RenderChart(parent, scope)
     local income,  spend,  net  = ns.CollectTotals(scope)
     local sIncome, sSpend, sNet = ns.CollectTotalsSince(scope, ns.sessionStart)
 
-    -- "Last N days" window from settings; falls back to 7 if the profile
-    -- hasn't loaded a value yet.
-    local windowDays = (ns.addon.db and ns.addon.db.profile and ns.addon.db.profile.windowDays) or 7
-    local windowSince = time() - windowDays * 86400
-    local wIncome, wSpend, wNet = ns.CollectTotalsSince(scope, windowSince)
+    -- "Last N days" window comes from the chart's own session state,
+    -- driven by the inline edit box in the middle totals row. 0 = all.
+    local windowDays = chartSession.windowDays or 7
+    local wIncome, wSpend, wNet
+    if windowDays > 0 then
+        local windowSince = time() - windowDays * 86400
+        wIncome, wSpend, wNet = ns.CollectTotalsSince(scope, windowSince)
+    else
+        wIncome, wSpend, wNet = income, spend, net
+    end
 
     local function fillRow(row, earned, spent, netv)
         row.earned:SetText(ns.FormatMoney(earned))
@@ -234,10 +298,13 @@ function ns.RenderChart(parent, scope)
         row.net:SetTextColor(unpack(netv >= 0 and T.C_GOOD or T.C_BAD))
     end
     fillRow(totals.session, sIncome, sSpend, sNet)
-    totals.window.title:SetText(string.format("Last %d %s",
-        windowDays, windowDays == 1 and "day" or "days"))
-    fillRow(totals.window, wIncome, wSpend, wNet)
-    fillRow(totals.total,  income,  spend,  net)
+    fillRow(totals.window,  wIncome, wSpend, wNet)
+    fillRow(totals.total,   income,  spend,  net)
+
+    -- Keep the edit box synced with state when the user isn't typing.
+    if totals.window.edit and not totals.window.edit:HasFocus() then
+        totals.window.edit:SetText(tostring(windowDays))
+    end
 
     -- Empty-state
     if #log < 2 then

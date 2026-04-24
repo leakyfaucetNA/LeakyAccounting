@@ -135,19 +135,17 @@ ns.SCROLLBAR_W   = SCROLLBAR_W
 local frame
 local activeTab = "chart"
 local scope     = "char"  -- "char" | "account"
-local chartContent, itemizedContent, charactersContent, settingsContent
-local chartBtn, itemizedBtn, charactersBtn, settingsBtn
+local chartContent, itemizedContent, charactersContent
+local chartBtn, itemizedBtn, charactersBtn
 local scopeCharBtn, scopeAccountBtn, scopeLbl
 
 local function refresh()
     chartContent:SetShown(activeTab == "chart")
     itemizedContent:SetShown(activeTab == "itemized")
     charactersContent:SetShown(activeTab == "characters")
-    settingsContent:SetShown(activeTab == "settings")
     setTabState(chartBtn,      activeTab == "chart")
     setTabState(itemizedBtn,   activeTab == "itemized")
     setTabState(charactersBtn, activeTab == "characters")
-    setTabState(settingsBtn,   activeTab == "settings")
     setTabState(scopeCharBtn,    scope == "char")
     setTabState(scopeAccountBtn, scope == "account")
 
@@ -163,8 +161,6 @@ local function refresh()
         ns.RenderItemized(itemizedContent, scope)
     elseif activeTab == "characters" and ns.RenderCharacters then
         ns.RenderCharacters(charactersContent)
-    elseif activeTab == "settings" and ns.RenderSettings then
-        ns.RenderSettings(settingsContent)
     end
 end
 
@@ -177,7 +173,12 @@ local function build()
     if frame then return frame end
 
     frame = CreateFrame("Frame", "LeakyAccountingFrame", UIParent, "BackdropTemplate")
-    frame:SetSize(760, 520)
+
+    -- Restore the last persisted window size (per profile) if one exists.
+    local saved = ns.addon.db and ns.addon.db.profile
+    local w = (saved and saved.frameWidth)  or 760
+    local h = (saved and saved.frameHeight) or 520
+    frame:SetSize(w, h)
     frame:SetPoint("CENTER")
     SetBD(frame, C_BG, C_BDR)
     frame:SetFrameStrata("HIGH")
@@ -210,6 +211,108 @@ local function build()
     close:SetPoint("RIGHT", -4, 0)
     close:SetScript("OnClick", function() frame:Hide() end)
 
+    -- UI scale slider in the title bar, left of the close button. The
+    -- percent readout to the left is click-to-edit; applies immediately
+    -- on commit. The slider only applies scale when the mouse is
+    -- released, otherwise continuous SetScale during drag flashes the
+    -- frame on every tick.
+    local scaleSlider = MakeScrollbar(title, "HORIZONTAL")
+    scaleSlider:SetSize(100, 12)
+    scaleSlider:SetPoint("RIGHT", close, "LEFT", -10, 0)
+    scaleSlider:Show()
+    scaleSlider:SetMinMaxValues(0.5, 2.0)
+    scaleSlider:SetValueStep(0.05)
+    scaleSlider:SetObeyStepOnDrag(false)
+    do
+        local thumb = scaleSlider:GetThumbTexture()
+        if thumb then thumb:SetSize(16, 8) end
+    end
+
+    -- Click-to-edit percent readout: Button with a FontString by default,
+    -- swaps to an EditBox holder on click for manual entry.
+    local scaleBtn = CreateFrame("Button", nil, title)
+    scaleBtn:SetSize(42, 16)
+    scaleBtn:SetPoint("RIGHT", scaleSlider, "LEFT", -6, 0)
+    local scaleLbl = scaleBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    scaleLbl:SetAllPoints(scaleBtn)
+    scaleLbl:SetJustifyH("RIGHT")
+    scaleLbl:SetTextColor(unpack(C_DIM))
+    scaleBtn:SetScript("OnEnter", function() scaleLbl:SetTextColor(unpack(C_ACCENT)) end)
+    scaleBtn:SetScript("OnLeave", function() scaleLbl:SetTextColor(unpack(C_DIM))    end)
+
+    local scaleEditHolder = CreateFrame("Frame", nil, title, "BackdropTemplate")
+    SetBD(scaleEditHolder, C_ELEM, C_BDR)
+    scaleEditHolder:SetSize(48, 18)
+    scaleEditHolder:SetPoint("RIGHT", scaleSlider, "LEFT", -6, 0)
+    scaleEditHolder:Hide()
+    local scaleEdit = CreateFrame("EditBox", nil, scaleEditHolder)
+    scaleEdit:SetPoint("TOPLEFT", 4, -2)
+    scaleEdit:SetPoint("BOTTOMRIGHT", -4, 2)
+    scaleEdit:SetAutoFocus(false)
+    scaleEdit:SetFontObject("GameFontNormalSmall")
+    scaleEdit:SetTextColor(unpack(C_TEXT))
+    scaleEdit:SetNumeric(true)
+    scaleEdit:SetMaxLetters(4)
+
+    -- Re-entry guard: applyScale calls SetValue on the slider which
+    -- itself fires OnValueChanged; without the guard we'd recurse.
+    local applying = false
+    local function applyScale(val)
+        if applying then return end
+        applying = true
+        if val < 0.5 then val = 0.5 elseif val > 2.0 then val = 2.0 end
+        frame:SetScale(val)
+        scaleSlider:SetValue(val)
+        scaleLbl:SetText(string.format("%d%%", math.floor(val * 100 + 0.5)))
+        if ns.addon.db and ns.addon.db.profile then
+            ns.addon.db.profile.frameScale = val
+        end
+        applying = false
+    end
+
+    local savedScale = (ns.addon.db and ns.addon.db.profile and ns.addon.db.profile.frameScale) or 1.0
+    applyScale(savedScale)
+
+    -- Slider: update the readout every tick so the user sees the target
+    -- value live, but defer the actual SetScale via a debounce. While
+    -- the user drags (continuous OnValueChanged) we keep rescheduling,
+    -- so SetScale only fires once — 100ms after the last change. Using
+    -- a debounce instead of OnMouseDown/Up because Slider frames don't
+    -- reliably surface those events (native thumb drag consumes them).
+    local pendingTimer
+    scaleSlider:SetScript("OnValueChanged", function(_, value)
+        scaleLbl:SetText(string.format("%d%%", math.floor(value * 100 + 0.5)))
+        if applying then return end
+        if pendingTimer then pendingTimer:Cancel() end
+        pendingTimer = C_Timer.NewTimer(0.1, function()
+            pendingTimer = nil
+            applyScale(value)
+        end)
+    end)
+
+    -- Click-to-edit flow
+    local function closeEdit()
+        scaleEditHolder:Hide()
+        scaleBtn:Show()
+    end
+    local function commitEdit(self)
+        local n = tonumber(self:GetText() or "")
+        if n then applyScale(n / 100) end
+        self:ClearFocus()
+        closeEdit()
+    end
+    scaleEdit:SetScript("OnEnterPressed",   commitEdit)
+    scaleEdit:SetScript("OnEditFocusLost",  commitEdit)
+    scaleEdit:SetScript("OnEscapePressed",  function(self) self:ClearFocus(); closeEdit() end)
+
+    scaleBtn:SetScript("OnClick", function()
+        scaleBtn:Hide()
+        scaleEditHolder:Show()
+        scaleEdit:SetText(tostring(math.floor(frame:GetScale() * 100 + 0.5)))
+        scaleEdit:SetFocus()
+        scaleEdit:HighlightText()
+    end)
+
     -- Tab bar
     local tabBar = MakePanel(frame, C_PANEL, C_BDR)
     tabBar:SetPoint("TOPLEFT", 0, -TITLE_H)
@@ -227,10 +330,6 @@ local function build()
     charactersBtn = MakeButton(tabBar, "Characters", 90, 22)
     charactersBtn:SetPoint("LEFT", itemizedBtn, "RIGHT", 6, 0)
     charactersBtn:SetScript("OnClick", function() activeTab = "characters" refresh() end)
-
-    settingsBtn = MakeButton(tabBar, "Settings", 80, 22)
-    settingsBtn:SetPoint("LEFT", charactersBtn, "RIGHT", 6, 0)
-    settingsBtn:SetScript("OnClick", function() activeTab = "settings" refresh() end)
 
     -- Scope toggle (right side)
     scopeLbl = MakeLabel(tabBar, "Scope:", 12, C_DIM)
@@ -257,10 +356,6 @@ local function build()
     charactersContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
     charactersContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
 
-    settingsContent = MakePanel(frame, C_PANEL, C_BDR)
-    settingsContent:SetPoint("TOPLEFT",     PAD, -(TITLE_H + TAB_H + PAD))
-    settingsContent:SetPoint("BOTTOMRIGHT", -PAD, PAD)
-
     -- Bottom-right resize grip
     local grip = CreateFrame("Button", nil, frame)
     grip:SetSize(16, 16)
@@ -278,8 +373,15 @@ local function build()
     end)
     grip:SetScript("OnMouseUp", function() frame:StopMovingOrSizing() end)
 
-    -- Re-render active tab when the frame is resized
-    frame:SetScript("OnSizeChanged", function() refresh() end)
+    -- Re-render active tab when the frame is resized, and persist the
+    -- new dimensions so they survive /reload and new sessions.
+    frame:SetScript("OnSizeChanged", function(self)
+        refresh()
+        if ns.addon.db and ns.addon.db.profile then
+            ns.addon.db.profile.frameWidth  = math.floor(self:GetWidth()  + 0.5)
+            ns.addon.db.profile.frameHeight = math.floor(self:GetHeight() + 0.5)
+        end
+    end)
     frame:SetScript("OnShow", refresh)
 
     -- When the frame hides, belt-and-suspenders-Hide the tab content panels
@@ -291,7 +393,6 @@ local function build()
         if chartContent      then chartContent:Hide()      end
         if itemizedContent   then itemizedContent:Hide()   end
         if charactersContent then charactersContent:Hide() end
-        if settingsContent   then settingsContent:Hide()   end
     end)
 
     return frame

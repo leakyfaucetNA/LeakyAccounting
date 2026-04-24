@@ -17,6 +17,7 @@ local pendingSale  -- { bag, slot, link, preCount, preGold }
 local sessionGold  -- gold at merchant-show
 local sessionTxnSpend, sessionTxnIncome = 0, 0
 local sawDurability
+local sessionGuildRepair  -- cost captured when RepairAllItems(true) is called
 
 -- -------------------------------------------------- --
 --  Buy handlers                                      --
@@ -115,6 +116,7 @@ local function OnMerchantShow()
     sessionGold = GetMoney()
     sessionTxnSpend, sessionTxnIncome = 0, 0
     sawDurability = false
+    sessionGuildRepair = nil
 end
 
 local function OnMerchantClosed()
@@ -125,11 +127,19 @@ local function OnMerchantClosed()
         if sawDurability and unattributed < 0 then
             ns.RecordMoney(unattributed, "repair", "Merchant")
         end
+        -- Guild-funded repair: player's wallet didn't change, so the normal
+        -- delta-based detector doesn't fire. Record it separately so the
+        -- row shows in the log, but the itemized totals skip it (see
+        -- totals computation in ui/itemized.lua).
+        if sessionGuildRepair and sessionGuildRepair > 0 then
+            ns.RecordMoney(-sessionGuildRepair, "guild-repair", "Guild Repair")
+        end
     end
-    merchantOpen  = false
-    pendingSale   = nil
-    sessionGold   = nil
-    sawDurability = false
+    merchantOpen      = false
+    pendingSale       = nil
+    sessionGold       = nil
+    sawDurability     = false
+    sessionGuildRepair = nil
 end
 
 local function OnDurability() sawDurability = true end
@@ -142,6 +152,18 @@ function ns.VendorOnLoad()
     hooksecurefunc("BuyMerchantItem", OnBuyMerchantItem)
     hooksecurefunc("BuybackItem",     OnBuybackItem)
     hooksecurefunc(C_Container, "UseContainerItem", OnUseContainerItem)
+
+    -- Pre-hook RepairAllItems. When called with true/1, the repair is
+    -- paid from the guild bank — we capture the pre-repair cost since
+    -- GetRepairAllCost() returns 0 after the repair completes.
+    local origRepairAll = RepairAllItems
+    RepairAllItems = function(useGuildFunds)
+        if useGuildFunds == true or useGuildFunds == 1 then
+            local cost = GetRepairAllCost() or 0
+            if cost > 0 then sessionGuildRepair = cost end
+        end
+        return origRepairAll(useGuildFunds)
+    end
 
     local f = CreateFrame("Frame")
     f:RegisterEvent("MERCHANT_SHOW")

@@ -12,6 +12,7 @@ local SOURCE_LABELS = {
     ["auction"]        = "Auction",
     ["trade"]          = "Trade",
     ["repair"]         = "Repair",
+    ["guild-repair"]   = "Repair",
     ["mail-received"]  = "Mail",
     ["trade-pay"]      = "Trade",
     ["trade-receive"]  = "Trade",
@@ -161,6 +162,7 @@ function ns.CollectTxns(scope)
             unitPrice   = txn.unitPrice,
             otherPlayer = txn.otherPlayer,
             _char       = charName,
+            _src        = txn,  -- reference to stored record for delete ops
         }
     end
     local function pushMoney(m, charName)
@@ -173,6 +175,7 @@ function ns.CollectTxns(scope)
             unitPrice   = math.abs(m.delta or 0),
             otherPlayer = m.otherPlayer,
             _char       = charName,
+            _src        = m,
         }
     end
     local function foldBucket(bucket)
@@ -329,6 +332,57 @@ function ns.ResetAllCharacters()
     ns.EnsureCharacter()
     ns.lpmsg("Reset: cleared all data for every character")
     if ns.OnDataChanged then ns.OnDataChanged() end
+end
+
+-- Remove a single stored record (transaction or money entry) by identity.
+-- `src` is the exact table reference that was stored in the DB — view-rows
+-- produced by CollectTxns carry it on `_src`. Returns true on success.
+function ns.DeleteRecord(src)
+    if type(src) ~= "table" then return false end
+    for _, bucket in ns.IterCharacters() do
+        for _, listKey in ipairs({"transactions", "money"}) do
+            local arr = bucket[listKey]
+            if arr then
+                for i = 1, #arr do
+                    if arr[i] == src then
+                        table.remove(arr, i)
+                        if ns.OnDataChanged then ns.OnDataChanged() end
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Remove every transaction across every character that shares the same
+-- item identity as `src` (matches on itemID when present, otherwise
+-- itemName). Money entries are never matched by this — "all entries for
+-- this item" only applies to real items. Returns the removed count.
+function ns.DeleteAllMatchingItem(src)
+    if type(src) ~= "table" then return 0 end
+    local id   = src.itemID
+    local name = (not id) and src.itemName or nil
+    if not id and not name then return 0 end
+
+    local removed = 0
+    for _, bucket in ns.IterCharacters() do
+        local arr = bucket.transactions
+        if arr then
+            for i = #arr, 1, -1 do
+                local e = arr[i]
+                local hit = (id and e.itemID == id)
+                    or (not id and name and e.itemName == name)
+                if hit then
+                    table.remove(arr, i)
+                    removed = removed + 1
+                end
+            end
+        end
+    end
+    if removed > 0 and ns.OnDataChanged then ns.OnDataChanged() end
+    return removed
 end
 
 -- Trim every character's transactions / money / goldLog to entries strictly

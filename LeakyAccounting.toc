@@ -2,7 +2,7 @@
 ## Title: Leaky Accounting
 ## Notes: Lightweight accounting — tracks items bought/sold, gold spent/gained, per-character and account-wide.
 ## Author: Leaky-BleedingHollow
-## Version: 0.4.0
+## Version: 0.5.0
 ## SavedVariables: LeakyAccountingDB
 ## OptionalDeps: Ace3
 ## AddonCompartmentFunc: LeakyAccounting_OnCompartmentClick
@@ -26,6 +26,5 @@ ui\ui.lua
 ui\chart.lua
 ui\itemized.lua
 ui\characters.lua
-ui\settings.lua
 ui\compartment.lua
 ui\interface_options.lua

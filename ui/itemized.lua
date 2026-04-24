@@ -25,9 +25,24 @@ local WINDOW_H  = 24
 --  Session state                                     --
 -- -------------------------------------------------- --
 
+-- Friendly Source labels the user sees in the Source column. Each maps to
+-- one or more raw `source` values in the DB via ns.FormatSource — the
+-- filter matches on the friendly label so "Trade" catches trade /
+-- trade-pay / trade-receive in one click.
+local FILTER_CATEGORIES = { "Vendor", "Auction", "Trade", "Repair", "Mail" }
+
+-- Default filter state = every category enabled (nothing filtered out).
+-- Unchecking a category narrows the list. Emptying all categories hides
+-- everything — consistent "checkbox = allowed" semantics.
+local function defaultFilterSources()
+    local t = {}
+    for _, c in ipairs(FILTER_CATEGORIES) do t[c] = true end
+    return t
+end
+
 local session = {
-    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7 },
-    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7 },
+    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7, filterSources = defaultFilterSources() },
+    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7, filterSources = defaultFilterSources() },
 }
 
 -- -------------------------------------------------- --
@@ -152,8 +167,24 @@ local function buildColumns(scope)
     if scope == "char" then
         add {
             key = "other", label = "Other", w = 100,
-            render  = function(t) return t.otherPlayer or "", T.C_DIM end,
-            sortVal = function(t) return (t.otherPlayer or ""):lower() end,
+            -- Show Other for direct trades (trade window, COD item,
+            -- trade-gold in/out) and for guild-funded repairs. Vendors,
+            -- auction, plain mail gold, and self-paid repairs have no
+            -- meaningful counterparty so we leave the cell blank there.
+            render = function(t)
+                local src = t.source or ""
+                if src == "trade" or src:match("^trade%-") or src == "guild-repair" then
+                    return t.otherPlayer or "", T.C_DIM
+                end
+                return "", T.C_DIM
+            end,
+            sortVal = function(t)
+                local src = t.source or ""
+                if src == "trade" or src:match("^trade%-") or src == "guild-repair" then
+                    return (t.otherPlayer or ""):lower()
+                end
+                return ""
+            end,
         }
     end
     return cols
@@ -163,15 +194,27 @@ end
 --  Filter / sort                                     --
 -- -------------------------------------------------- --
 
-local function filterTxns(txns, query, windowDays)
+local function filterTxns(txns, query, windowDays, filterSources)
     local q       = (query and query ~= "") and query:lower() or nil
     local cutoff  = (windowDays and windowDays > 0) and (time() - windowDays * 86400) or nil
-    if not q and not cutoff then return txns end
+
+    -- Determine whether the source filter is actually narrowing the list.
+    -- If every known category is checked, we skip the per-row check.
+    local useSrc = false
+    if filterSources then
+        for _, cat in ipairs(FILTER_CATEGORIES) do
+            if not filterSources[cat] then useSrc = true; break end
+        end
+    end
+    if not q and not cutoff and not useSrc then return txns end
 
     local out = {}
     for _, t in ipairs(txns) do
         local pass = true
         if cutoff and t.t and t.t < cutoff then pass = false end
+        if pass and useSrc then
+            if not filterSources[ns.FormatSource(t.source)] then pass = false end
+        end
         if pass and q then
             local hay = table.concat({
                 t.itemName or "",
@@ -421,7 +464,7 @@ local function itemHitboxEnter(self)
     if link then
         GameTooltip:SetHyperlink(link)
     elseif self._itemName then
-        GameTooltip:SetText(self._itemName)
+        GameTooltip:SetText(self._itemName, 1, 1, 1)
     end
     GameTooltip:Show()
 end
@@ -430,7 +473,155 @@ local function itemHitboxLeave()
     GameTooltip:Hide()
 end
 
-local function itemHitboxClick(self)
+-- -------------------------------------------------- --
+--  Delete popups                                     --
+-- -------------------------------------------------- --
+
+StaticPopupDialogs["LEAKYACCOUNTING_DELETE_ENTRY"] = {
+    text         = "Delete this entry?\n\n%s",
+    button1      = YES,
+    button2      = NO,
+    OnAccept     = function(self)
+        local src = self.data
+        if src and ns.DeleteRecord then ns.DeleteRecord(src) end
+    end,
+    timeout      = 0,
+    whileDead    = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+StaticPopupDialogs["LEAKYACCOUNTING_DELETE_ALL_ITEM"] = {
+    text         = "Delete ALL entries for %s across every character?\n\nThis cannot be undone.",
+    button1      = YES,
+    button2      = NO,
+    OnAccept     = function(self)
+        local src = self.data
+        if src and ns.DeleteAllMatchingItem then
+            local n = ns.DeleteAllMatchingItem(src)
+            ns.lpmsg("Deleted " .. n .. " matching entries.")
+        end
+    end,
+    timeout      = 0,
+    whileDead    = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Strip color / hyperlink markup so the popup title fits the standard
+-- popup font (which ignores |c / |H anyway when embedded via format).
+local function plainItemName(src)
+    if not src then return "item" end
+    if src.itemName then return src.itemName end
+    if src.itemLink then return stripLink(src.itemLink) end
+    return "item"
+end
+
+-- Styled context menu. `items` is an array of descriptors:
+--   { kind = "title",  text = "Foo" }
+--   { kind = "button", text = "Delete", onClick = function() ... end }
+-- Spawns a small dark panel at the cursor with our accent-on-hover rows.
+-- A full-screen DIALOG-strata catcher dismisses it when clicked outside;
+-- clicking a button runs its callback then closes.
+local function showStyledMenu(items)
+    local PAD_M    = 6
+    local TITLE_M  = 22
+    local ROW_M    = 22
+    local WIDTH    = 170
+
+    local menu = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+    ns.SetBD(menu, T.C_BG, T.C_BDR)
+    menu:SetFrameStrata("DIALOG")
+    menu:EnableMouse(true)
+
+    local y = -PAD_M
+    for _, item in ipairs(items) do
+        if item.kind == "title" then
+            local t = ns.MakeLabel(menu, item.text, 12, T.C_ACCENT)
+            t:SetPoint("TOPLEFT",  PAD_M + 4, y)
+            t:SetPoint("TOPRIGHT", -PAD_M - 4, y)
+            t:SetJustifyH("LEFT")
+            t:SetWordWrap(true)
+            -- Long item names wrap onto multiple lines; GetStringHeight
+            -- reports the actual rendered height so the next row anchors
+            -- below the wrapped block instead of overlapping it.
+            local textH = math.max(TITLE_M, (t:GetStringHeight() or 0) + 6)
+            y = y - textH
+        elseif item.kind == "button" then
+            local row = CreateFrame("Button", nil, menu, "BackdropTemplate")
+            row:SetHeight(ROW_M - 2)
+            row:SetPoint("TOPLEFT",  PAD_M, y)
+            row:SetPoint("TOPRIGHT", -PAD_M, y)
+            ns.SetBD(row, T.C_PANEL, T.C_BDR)
+            local lbl = ns.MakeLabel(row, item.text, 12, T.C_TEXT)
+            lbl:SetPoint("LEFT", 8, 0)
+            row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
+            row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
+            row:SetScript("OnClick", function()
+                menu:Hide()
+                if item.onClick then item.onClick() end
+            end)
+            y = y - ROW_M
+        end
+    end
+
+    menu:SetSize(WIDTH, -y + PAD_M)
+
+    -- Place the top-left at the cursor, clamped to screen bounds.
+    local mx, my = GetCursorPosition()
+    local scale  = UIParent:GetEffectiveScale()
+    mx = mx / scale; my = my / scale
+    local w, h   = menu:GetSize()
+    local screenW = UIParent:GetWidth()
+    if mx + w > screenW then mx = screenW - w end
+    if my - h < 0       then my = h end
+    menu:ClearAllPoints()
+    menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", mx, my)
+
+    local catcher = CreateFrame("Frame", nil, UIParent)
+    catcher:SetAllPoints(UIParent)
+    catcher:SetFrameStrata("DIALOG")
+    catcher:SetFrameLevel(menu:GetFrameLevel() - 1)
+    catcher:EnableMouse(true)
+    catcher:SetScript("OnMouseDown", function() menu:Hide() end)
+
+    menu:SetScript("OnHide", function()
+        catcher:Hide(); catcher:SetParent(nil)
+        menu:SetParent(nil)
+    end)
+    menu:Show()
+    menu:Raise()
+end
+
+local function openRowContextMenu(self)
+    local src = self._src
+    if not src then return end
+    local label = plainItemName(src)
+
+    local items = {
+        { kind = "title",  text = label },
+        { kind = "button", text = "Delete", onClick = function()
+            local popup = StaticPopup_Show("LEAKYACCOUNTING_DELETE_ENTRY", label)
+            if popup then popup.data = src end
+        end },
+    }
+    -- "Delete (All)" is item-scoped only — hide for Gold / money rows.
+    local isItem = (src.itemID ~= nil) or (src.itemName and src.itemName ~= "Gold")
+    if isItem then
+        items[#items + 1] = { kind = "button", text = "Delete (All)", onClick = function()
+            local popup = StaticPopup_Show("LEAKYACCOUNTING_DELETE_ALL_ITEM", label)
+            if popup then popup.data = src end
+        end }
+    end
+
+    showStyledMenu(items)
+end
+
+local function itemHitboxClick(self, button)
+    if button == "RightButton" then
+        openRowContextMenu(self)
+        return
+    end
     if IsModifiedClick("CHATLINK") then
         local link = self._itemLink
         if not link and self._itemName then
@@ -485,6 +676,7 @@ local function fillRow(row, cols, txn)
     if row.itemHitbox then
         row.itemHitbox._itemLink = txn.itemLink
         row.itemHitbox._itemName = txn.itemName
+        row.itemHitbox._src      = txn._src
     end
 end
 
@@ -501,6 +693,9 @@ local function destroyLayout(layout)
     if layout.windowRow    then layout.windowRow:Hide();    layout.windowRow:SetParent(nil)    end
     if layout.search       then layout.search:Hide();       layout.search:SetParent(nil)       end
     if layout.searchLbl    then layout.searchLbl:Hide()                                         end
+    if layout.filterBtn      then layout.filterBtn:Hide();      layout.filterBtn:SetParent(nil)      end
+    if layout.filterDropdown then layout.filterDropdown:Hide(); layout.filterDropdown:SetParent(nil) end
+    if layout.filterCatcher  then layout.filterCatcher:Hide();  layout.filterCatcher:SetParent(nil)  end
 end
 
 local function ensureLayout(parent, scope)
@@ -523,13 +718,101 @@ local function ensureLayout(parent, scope)
     }
     parent._layout = layout
 
-    -- Search box
+    -- Filter button (top-right). Click toggles a styled dropdown panel.
+    local filterBtn = ns.MakeButton(parent, "Filter", 100, SEARCH_H - 2)
+    filterBtn:SetPoint("TOPRIGHT", -T.PAD, -T.PAD - 1)
+    layout.filterBtn = filterBtn
+
+    -- Dropdown panel: dark backdrop + blue accent thumb, matching the
+    -- rest of the UI. A full-screen mouse "catcher" sits just beneath the
+    -- panel so clicking anywhere outside closes it.
+    local PAD_D   = 6
+    local ROW_H_D = 22
+    local TITLE_D = 22
+    local DROP_W  = 170
+
+    local dropdown = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+    ns.SetBD(dropdown, T.C_BG, T.C_BDR)
+    dropdown:SetFrameStrata("DIALOG")
+    dropdown:SetSize(DROP_W, PAD_D * 2 + TITLE_D + #FILTER_CATEGORIES * ROW_H_D)
+    dropdown:EnableMouse(true)
+    dropdown:SetPoint("TOPRIGHT", filterBtn, "BOTTOMRIGHT", 0, -2)
+    dropdown:Hide()
+    layout.filterDropdown = dropdown
+
+    local dropTitle = ns.MakeLabel(dropdown, "Source", 12, T.C_ACCENT)
+    dropTitle:SetPoint("TOPLEFT", PAD_D + 4, -PAD_D)
+
+    for i, cat in ipairs(FILTER_CATEGORIES) do
+        local row = CreateFrame("Button", nil, dropdown, "BackdropTemplate")
+        row:SetHeight(ROW_H_D - 2)
+        row:SetPoint("TOPLEFT",  PAD_D, -(PAD_D + TITLE_D + (i - 1) * ROW_H_D))
+        row:SetPoint("TOPRIGHT", -PAD_D, -(PAD_D + TITLE_D + (i - 1) * ROW_H_D))
+        ns.SetBD(row, T.C_PANEL, T.C_BDR)
+
+        local box = CreateFrame("Frame", nil, row, "BackdropTemplate")
+        box:SetSize(12, 12)
+        box:SetPoint("LEFT", 6, 0)
+        ns.SetBD(box, T.C_ELEM, T.C_BDR)
+        local fill = box:CreateTexture(nil, "OVERLAY")
+        fill:SetTexture(T.TEX)
+        fill:SetPoint("TOPLEFT", 2, -2)
+        fill:SetPoint("BOTTOMRIGHT", -2, 2)
+        fill:SetVertexColor(unpack(T.C_ACCENT))
+
+        local lbl = ns.MakeLabel(row, cat, 12, T.C_TEXT)
+        lbl:SetPoint("LEFT", box, "RIGHT", 8, 0)
+
+        local function refreshRow() fill:SetShown(state.filterSources[cat] == true) end
+        row._refresh = refreshRow
+        refreshRow()
+
+        row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
+        row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
+        row:SetScript("OnClick", function()
+            state.filterSources[cat] = state.filterSources[cat] and nil or true
+            refreshRow()
+            ns.RenderItemized(parent, scope)
+        end)
+
+        dropdown[cat] = row
+    end
+    dropdown._refresh = function()
+        for _, cat in ipairs(FILTER_CATEGORIES) do
+            local r = dropdown[cat]; if r and r._refresh then r._refresh() end
+        end
+    end
+
+    -- Mouse catcher: full-screen DIALOG-strata frame just beneath the
+    -- panel. Any click outside the panel hits the catcher and closes it.
+    local catcher = CreateFrame("Frame", nil, UIParent)
+    catcher:SetAllPoints(UIParent)
+    catcher:SetFrameStrata("DIALOG")
+    catcher:SetFrameLevel(dropdown:GetFrameLevel() - 1)
+    catcher:EnableMouse(true)
+    catcher:Hide()
+    catcher:SetScript("OnMouseDown", function() dropdown:Hide() end)
+    dropdown:SetScript("OnShow", function() catcher:Show() end)
+    dropdown:SetScript("OnHide", function() catcher:Hide() end)
+    layout.filterCatcher = catcher
+
+    filterBtn:SetScript("OnClick", function()
+        if dropdown:IsShown() then
+            dropdown:Hide()
+        else
+            dropdown._refresh()
+            dropdown:Show()
+            dropdown:Raise()
+        end
+    end)
+
+    -- Search box (left of the Filter button)
     local search = makeSearchBox(parent, function(text)
         state.search = text
         ns.RenderItemized(parent, scope)
     end)
     search:SetPoint("TOPLEFT",  T.PAD + 52, -T.PAD)
-    search:SetPoint("TOPRIGHT", -T.PAD, -T.PAD)
+    search:SetPoint("TOPRIGHT", filterBtn, "TOPLEFT", -8, 0)
     search.label:SetPoint("RIGHT", search, "LEFT", -4, 0)
     search.editBox:SetText(state.search or "")
     layout.search    = search
@@ -636,8 +919,28 @@ local function ensureLayout(parent, scope)
     local netVal = ns.MakeLabel(totalsStrip, "", 12, T.C_TEXT)
     netVal:SetPoint("LEFT", netLbl, "RIGHT", 6, 0)
 
+    -- Average unit price — shown only when the filtered rows collapse to
+    -- a single item (e.g. search resolves to one unique itemID). Hidden
+    -- otherwise; render layer toggles visibility each paint.
+    local avgBuyLbl = ns.MakeLabel(totalsStrip, "Avg Buy:", 12, T.C_DIM)
+    avgBuyLbl:SetPoint("LEFT", netVal, "RIGHT", 24, 0)
+    local avgBuyVal = ns.MakeLabel(totalsStrip, "", 12, T.C_BAD)
+    avgBuyVal:SetPoint("LEFT", avgBuyLbl, "RIGHT", 6, 0)
+
+    local avgSellLbl = ns.MakeLabel(totalsStrip, "Avg Sell:", 12, T.C_DIM)
+    avgSellLbl:SetPoint("LEFT", avgBuyVal, "RIGHT", 20, 0)
+    local avgSellVal = ns.MakeLabel(totalsStrip, "", 12, T.C_GOOD)
+    avgSellVal:SetPoint("LEFT", avgSellLbl, "RIGHT", 6, 0)
+
+    avgBuyLbl:Hide(); avgBuyVal:Hide()
+    avgSellLbl:Hide(); avgSellVal:Hide()
+
     layout.totalsStrip = totalsStrip
-    layout.totals = { earned = earnedVal, spent = spentVal, net = netVal }
+    layout.totals = {
+        earned = earnedVal, spent = spentVal, net = netVal,
+        avgBuyLbl  = avgBuyLbl,  avgBuyVal  = avgBuyVal,
+        avgSellLbl = avgSellLbl, avgSellVal = avgSellVal,
+    }
 
     -- Window filter row: sits just above the totals strip. Independent of
     -- the Settings-tab windowDays — each scope keeps its own live filter
@@ -701,22 +1004,76 @@ function ns.RenderItemized(parent, scope)
     updateHeaderArrows(layout)
     layoutHeaderAndRows(layout)
 
+    -- Filter button label: "Filter" when every category is checked (no
+    -- narrowing); "Filter (N/Total)" when the list has been narrowed.
+    if layout.filterBtn and layout.filterBtn.text then
+        local checked, total = 0, #FILTER_CATEGORIES
+        for _, cat in ipairs(FILTER_CATEGORIES) do
+            if state.filterSources[cat] then checked = checked + 1 end
+        end
+        if checked == total then
+            layout.filterBtn.text:SetText("Filter")
+        else
+            layout.filterBtn.text:SetText(string.format("Filter (%d/%d)", checked, total))
+        end
+    end
+
     local txns = ns.CollectTxns(scope)
-    txns = filterTxns(txns, state.search, state.windowDays)
+    txns = filterTxns(txns, state.search, state.windowDays, state.filterSources)
     sortTxns(txns, layout.cols, state.sortKey, state.sortDir)
 
-    -- Totals over whatever is currently shown (i.e. post-filter).
+    -- Totals over whatever is currently shown (i.e. post-filter). Also
+    -- accumulates per-kind qty+total so we can show Avg Buy / Avg Sell
+    -- when the filter resolves to one unique item.
     local earned, spent = 0, 0
-    for _, t in ipairs(txns) do
+    local buyTotal, buyQty, sellTotal, sellQty = 0, 0, 0, 0
+    local soleKey, mixed = nil, false
+    for i, t in ipairs(txns) do
         local v = (t.qty or 1) * (t.unitPrice or 0)
-        if     t.kind == "sell" then earned = earned + v
-        elseif t.kind == "buy"  then spent  = spent  + v end
+        -- Guild-funded repairs came out of the guild bank, not the
+        -- player's wallet — we still show the row (with the Other
+        -- column noting the context) but don't let it shift the
+        -- player's Earned / Spent / Net numbers.
+        local countable = t.source ~= "guild-repair"
+        if countable then
+            if     t.kind == "sell" then earned = earned + v; sellTotal = sellTotal + v; sellQty = sellQty + (t.qty or 1)
+            elseif t.kind == "buy"  then spent  = spent  + v; buyTotal  = buyTotal  + v; buyQty  = buyQty  + (t.qty or 1) end
+        end
+
+        local key = t.itemID or t.itemName
+        if i == 1 then
+            soleKey = key
+        elseif key ~= soleKey then
+            mixed = true
+        end
     end
     local net = earned - spent
     layout.totals.earned:SetText(ns.FormatMoney(earned))
     layout.totals.spent:SetText(ns.FormatMoney(spent))
     layout.totals.net:SetText(ns.FormatMoney(net))
     layout.totals.net:SetTextColor(unpack(net >= 0 and T.C_GOOD or T.C_BAD))
+
+    -- Show Avg Buy / Avg Sell only when exactly one unique item is visible
+    -- AND at least one row exists for the respective kind. "Gold" rows
+    -- (money log) count as their own key, so mixed gold+item filtering
+    -- correctly suppresses the avg.
+    local isSingle = (#txns > 0) and (not mixed) and (soleKey ~= nil)
+    if isSingle and buyQty > 0 then
+        layout.totals.avgBuyLbl:Show()
+        layout.totals.avgBuyVal:Show()
+        layout.totals.avgBuyVal:SetText(ns.FormatMoney(math.floor(buyTotal / buyQty + 0.5)))
+    else
+        layout.totals.avgBuyLbl:Hide()
+        layout.totals.avgBuyVal:Hide()
+    end
+    if isSingle and sellQty > 0 then
+        layout.totals.avgSellLbl:Show()
+        layout.totals.avgSellVal:Show()
+        layout.totals.avgSellVal:SetText(ns.FormatMoney(math.floor(sellTotal / sellQty + 0.5)))
+    else
+        layout.totals.avgSellLbl:Hide()
+        layout.totals.avgSellVal:Hide()
+    end
 
     for _, r in ipairs(layout.rows) do r:Hide() end
 

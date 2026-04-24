@@ -165,6 +165,42 @@ function ns.VendorOnLoad()
         return origRepairAll(useGuildFunds)
     end
 
+    -- Pre-hook SellAllJunkItems. The "Sell All Junk" button bypasses
+    -- UseContainerItem, so the individual-sale detector never fires —
+    -- we have to enumerate gray items ourselves before the call. For
+    -- each poor-quality item with a sell price, record a sell row
+    -- using the item's known vendor price. Gold delta still rolls
+    -- through via PLAYER_MONEY, and sessionTxnIncome so the merchant
+    -- session's unattributed-delta math stays balanced.
+    if C_MerchantFrame and C_MerchantFrame.SellAllJunkItems then
+        local origSellAllJunk = C_MerchantFrame.SellAllJunkItems
+        C_MerchantFrame.SellAllJunkItems = function(...)
+            for bag = 0, 5 do
+                local n = C_Container.GetContainerNumSlots(bag) or 0
+                for slot = 1, n do
+                    local info = C_Container.GetContainerItemInfo(bag, slot)
+                    if info
+                       and info.quality == Enum.ItemQuality.Poor
+                       and not info.hasNoValue then
+                        local _, _, _, _, _, _, _, _, _, _, sellPrice =
+                            C_Item.GetItemInfo(info.itemID)
+                        if sellPrice and sellPrice > 0 then
+                            local qty = info.stackCount or 1
+                            ns.RecordTxn("sell", "vendor", {
+                                itemLink    = info.hyperlink,
+                                qty         = qty,
+                                unitPrice   = sellPrice,
+                                otherPlayer = "Merchant",
+                            })
+                            sessionTxnIncome = sessionTxnIncome + sellPrice * qty
+                        end
+                    end
+                end
+            end
+            return origSellAllJunk(...)
+        end
+    end
+
     local f = CreateFrame("Frame")
     f:RegisterEvent("MERCHANT_SHOW")
     f:RegisterEvent("MERCHANT_CLOSED")

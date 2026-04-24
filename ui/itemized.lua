@@ -45,6 +45,18 @@ local session = {
     account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7, filterSources = defaultFilterSources() },
 }
 
+-- Debounce render calls that come from fast-firing input events (search
+-- keystrokes, window-days typing). One shared timer collapses a burst of
+-- keystrokes into a single RenderItemized call.
+local pendingRender
+local function scheduleRender(parent, scope)
+    if pendingRender then pendingRender:Cancel() end
+    pendingRender = C_Timer.NewTimer(0.15, function()
+        pendingRender = nil
+        ns.RenderItemized(parent, scope)
+    end)
+end
+
 -- -------------------------------------------------- --
 --  Item-info resolver                                --
 -- -------------------------------------------------- --
@@ -520,77 +532,111 @@ end
 -- Styled context menu. `items` is an array of descriptors:
 --   { kind = "title",  text = "Foo" }
 --   { kind = "button", text = "Delete", onClick = function() ... end }
--- Spawns a small dark panel at the cursor with our accent-on-hover rows.
--- A full-screen DIALOG-strata catcher dismisses it when clicked outside;
--- clicking a button runs its callback then closes.
+-- Pooled singleton — the menu Frame, its catcher, and a reusable row
+-- pool are created once and reshown on subsequent calls. This matters
+-- because WoW can't actually free Frame objects, so creating a new
+-- menu per right-click accumulates orphaned frames indefinitely.
+local styledMenu, styledMenuCatcher, styledMenuTitle
+local styledMenuRowPool = {}
+
+local STYLED_MENU_PAD    = 6
+local STYLED_MENU_TITLE  = 22
+local STYLED_MENU_ROW_H  = 22
+local STYLED_MENU_WIDTH  = 170
+
+local function ensureStyledMenu()
+    if styledMenu then return end
+
+    styledMenu = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+    ns.SetBD(styledMenu, T.C_BG, T.C_BDR)
+    styledMenu:SetFrameStrata("DIALOG")
+    styledMenu:SetWidth(STYLED_MENU_WIDTH)
+    styledMenu:EnableMouse(true)
+    styledMenu:Hide()
+
+    styledMenuTitle = ns.MakeLabel(styledMenu, "", 12, T.C_ACCENT)
+    styledMenuTitle:SetWordWrap(true)
+    styledMenuTitle:SetJustifyH("LEFT")
+    styledMenuTitle:Hide()
+
+    styledMenuCatcher = CreateFrame("Frame", nil, UIParent)
+    styledMenuCatcher:SetAllPoints(UIParent)
+    styledMenuCatcher:SetFrameStrata("DIALOG")
+    styledMenuCatcher:SetFrameLevel(styledMenu:GetFrameLevel() - 1)
+    styledMenuCatcher:EnableMouse(true)
+    styledMenuCatcher:Hide()
+    styledMenuCatcher:SetScript("OnMouseDown", function() styledMenu:Hide() end)
+
+    styledMenu:SetScript("OnShow", function() styledMenuCatcher:Show() end)
+    styledMenu:SetScript("OnHide", function() styledMenuCatcher:Hide() end)
+end
+
+local function getStyledMenuRow(index)
+    local row = styledMenuRowPool[index]
+    if row then return row end
+
+    row = CreateFrame("Button", nil, styledMenu, "BackdropTemplate")
+    row:SetHeight(STYLED_MENU_ROW_H - 2)
+    ns.SetBD(row, T.C_PANEL, T.C_BDR)
+    row.label = ns.MakeLabel(row, "", 12, T.C_TEXT)
+    row.label:SetPoint("LEFT", 8, 0)
+    row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
+    row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
+    row:SetScript("OnClick", function(s)
+        styledMenu:Hide()
+        if s._onClick then s._onClick() end
+    end)
+    styledMenuRowPool[index] = row
+    return row
+end
+
 local function showStyledMenu(items)
-    local PAD_M    = 6
-    local TITLE_M  = 22
-    local ROW_M    = 22
-    local WIDTH    = 170
+    ensureStyledMenu()
 
-    local menu = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
-    ns.SetBD(menu, T.C_BG, T.C_BDR)
-    menu:SetFrameStrata("DIALOG")
-    menu:EnableMouse(true)
+    -- Hide all pooled rows first; only the ones we re-populate will Show().
+    for _, row in ipairs(styledMenuRowPool) do row:Hide() end
+    styledMenuTitle:Hide()
 
-    local y = -PAD_M
+    local y = -STYLED_MENU_PAD
+    local buttonIdx = 0
     for _, item in ipairs(items) do
         if item.kind == "title" then
-            local t = ns.MakeLabel(menu, item.text, 12, T.C_ACCENT)
-            t:SetPoint("TOPLEFT",  PAD_M + 4, y)
-            t:SetPoint("TOPRIGHT", -PAD_M - 4, y)
-            t:SetJustifyH("LEFT")
-            t:SetWordWrap(true)
-            -- Long item names wrap onto multiple lines; GetStringHeight
-            -- reports the actual rendered height so the next row anchors
-            -- below the wrapped block instead of overlapping it.
-            local textH = math.max(TITLE_M, (t:GetStringHeight() or 0) + 6)
+            styledMenuTitle:SetText(item.text)
+            styledMenuTitle:ClearAllPoints()
+            styledMenuTitle:SetPoint("TOPLEFT",  STYLED_MENU_PAD + 4, y)
+            styledMenuTitle:SetPoint("TOPRIGHT", -STYLED_MENU_PAD - 4, y)
+            styledMenuTitle:Show()
+            local textH = math.max(STYLED_MENU_TITLE, (styledMenuTitle:GetStringHeight() or 0) + 6)
             y = y - textH
         elseif item.kind == "button" then
-            local row = CreateFrame("Button", nil, menu, "BackdropTemplate")
-            row:SetHeight(ROW_M - 2)
-            row:SetPoint("TOPLEFT",  PAD_M, y)
-            row:SetPoint("TOPRIGHT", -PAD_M, y)
-            ns.SetBD(row, T.C_PANEL, T.C_BDR)
-            local lbl = ns.MakeLabel(row, item.text, 12, T.C_TEXT)
-            lbl:SetPoint("LEFT", 8, 0)
-            row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
-            row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
-            row:SetScript("OnClick", function()
-                menu:Hide()
-                if item.onClick then item.onClick() end
-            end)
-            y = y - ROW_M
+            buttonIdx = buttonIdx + 1
+            local row = getStyledMenuRow(buttonIdx)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT",  STYLED_MENU_PAD, y)
+            row:SetPoint("TOPRIGHT", -STYLED_MENU_PAD, y)
+            row.label:SetText(item.text)
+            row._onClick = item.onClick
+            row:Show()
+            y = y - STYLED_MENU_ROW_H
         end
     end
 
-    menu:SetSize(WIDTH, -y + PAD_M)
+    styledMenu:SetHeight(-y + STYLED_MENU_PAD)
 
-    -- Place the top-left at the cursor, clamped to screen bounds.
-    local mx, my = GetCursorPosition()
-    local scale  = UIParent:GetEffectiveScale()
+    -- Position the top-left at the cursor, clamped to the screen so a
+    -- click near the right/bottom edge doesn't send the menu off-screen.
+    local mx, my  = GetCursorPosition()
+    local scale   = UIParent:GetEffectiveScale()
     mx = mx / scale; my = my / scale
-    local w, h   = menu:GetSize()
+    local w, h    = styledMenu:GetSize()
     local screenW = UIParent:GetWidth()
     if mx + w > screenW then mx = screenW - w end
     if my - h < 0       then my = h end
-    menu:ClearAllPoints()
-    menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", mx, my)
+    styledMenu:ClearAllPoints()
+    styledMenu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", mx, my)
 
-    local catcher = CreateFrame("Frame", nil, UIParent)
-    catcher:SetAllPoints(UIParent)
-    catcher:SetFrameStrata("DIALOG")
-    catcher:SetFrameLevel(menu:GetFrameLevel() - 1)
-    catcher:EnableMouse(true)
-    catcher:SetScript("OnMouseDown", function() menu:Hide() end)
-
-    menu:SetScript("OnHide", function()
-        catcher:Hide(); catcher:SetParent(nil)
-        menu:SetParent(nil)
-    end)
-    menu:Show()
-    menu:Raise()
+    styledMenu:Show()
+    styledMenu:Raise()
 end
 
 local function openRowContextMenu(self)
@@ -809,7 +855,7 @@ local function ensureLayout(parent, scope)
     -- Search box (left of the Filter button)
     local search = makeSearchBox(parent, function(text)
         state.search = text
-        ns.RenderItemized(parent, scope)
+        scheduleRender(parent, scope)
     end)
     search:SetPoint("TOPLEFT",  T.PAD + 52, -T.PAD)
     search:SetPoint("TOPRIGHT", filterBtn, "TOPLEFT", -8, 0)
@@ -848,8 +894,15 @@ local function ensureLayout(parent, scope)
         local grip = makeResizeGrip(header, function(phase, newWidth)
             if     phase == "begin"  then return widthFor(state, myCol)
             elseif phase == "update" then
-                state.widths[myCol.key] = math.max(MIN_COL_W, newWidth)
-                layoutHeaderAndRows(layout)
+                -- OnUpdate fires every frame while dragging; skip the
+                -- layout pass when the cursor hasn't moved enough to
+                -- change the rounded width (was re-laying out 60+ times
+                -- per second for a stationary cursor).
+                local w = math.max(MIN_COL_W, math.floor(newWidth + 0.5))
+                if state.widths[myCol.key] ~= w then
+                    state.widths[myCol.key] = w
+                    layoutHeaderAndRows(layout)
+                end
             end
         end)
         layout.grips[col.key] = grip
@@ -978,7 +1031,7 @@ local function ensureLayout(parent, scope)
         if not n or n < 0 then n = 0 end
         if n > 36500 then n = 36500 end
         state.windowDays = n
-        ns.RenderItemized(parent, scope)
+        scheduleRender(parent, scope)
     end
     wEb:SetScript("OnEnterPressed", function(self) applyWindow(); self:ClearFocus() end)
     wEb:SetScript("OnEditFocusLost", applyWindow)

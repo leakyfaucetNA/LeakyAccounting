@@ -48,12 +48,27 @@ end
 --  Per-session dedup                                 --
 -- -------------------------------------------------- --
 
-local taken = {}
+-- FIFO-bounded set: keys live in `taken`, insertion order in `takenOrder`.
+-- Capped at TAKEN_CAP so a marathon session with lots of mail activity
+-- can't grow the set without bound. Oldest entries drop when we overflow.
+local TAKEN_CAP = 500
+local taken      = {}
+local takenOrder = {}
 
 local function mailId(sender, subject, money, daysLeft)
     return string.format("%s|%s|%d|%.1f",
         tostring(sender or ""), tostring(subject or ""),
         money or 0, daysLeft or 0)
+end
+
+local function markTaken(id)
+    if taken[id] then return end
+    taken[id] = true
+    takenOrder[#takenOrder + 1] = id
+    if #takenOrder > TAKEN_CAP then
+        local old = table.remove(takenOrder, 1)
+        taken[old] = nil
+    end
 end
 
 -- -------------------------------------------------- --
@@ -110,7 +125,7 @@ local function recordMail(index, tries)
             unitPrice   = math.floor(money / qty),
             otherPlayer = invPlayer,
         })
-        taken[id] = true
+        markTaken(id)
         return true
 
     elseif invoiceType == "buyer" then
@@ -129,7 +144,7 @@ local function recordMail(index, tries)
             unitPrice   = price,
             otherPlayer = (invPlayer and invPlayer ~= "") and invPlayer or "Auction House",
         })
-        taken[id] = true
+        markTaken(id)
         return true
 
     elseif invoiceType == "seller_temp_invoice" then
@@ -144,7 +159,7 @@ local function recordMail(index, tries)
     if PATTERNS.expired and subject:match(PATTERNS.expired)
        or PATTERNS.removed and subject:match(PATTERNS.removed)
        or PATTERNS.outbid  and subject:match(PATTERNS.outbid) then
-        taken[id] = true
+        markTaken(id)
         return true
     end
 
@@ -158,14 +173,14 @@ local function recordMail(index, tries)
             unitPrice   = cod,
             otherPlayer = sender,
         })
-        taken[id] = true
+        markTaken(id)
         return true
     end
 
     -- Plain money-only mail (no item, no cod, no invoice)
     if money > 0 and not hasItem then
         ns.RecordMoney(money, "mail-received", sender)
-        taken[id] = true
+        markTaken(id)
         return true
     end
 

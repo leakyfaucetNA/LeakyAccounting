@@ -221,12 +221,23 @@ function ns.CollectTotalsSince(scope, sinceTime)
     local income, spend = 0, 0
     local function fold(bucket)
         local log = bucket.goldLog
-        if #log == 0 then return end
-        local startIdx = 1
-        for i = 1, #log do
-            if log[i].t < sinceTime then startIdx = i else break end
+        local n = #log
+        if n == 0 then return end
+
+        -- Binary search for the largest index with log[i].t < sinceTime.
+        -- The log is time-sorted so this is O(log n) instead of O(n).
+        local lo, hi, startIdx = 1, n, 1
+        while lo <= hi do
+            local mid = math.floor((lo + hi) / 2)
+            if log[mid].t < sinceTime then
+                startIdx = mid
+                lo = mid + 1
+            else
+                hi = mid - 1
+            end
         end
-        for i = startIdx + 1, #log do
+
+        for i = startIdx + 1, n do
             local d = log[i].gold - log[i - 1].gold
             if d > 0 then income = income + d
             elseif d < 0 then spend = spend - d end
@@ -247,7 +258,11 @@ end
 -- per-character "most recent snapshot <= t" and adding.
 function ns.CollectGoldLog(scope)
     if scope == "account" then
-        -- Merge: for each distinct timestamp, sum most-recent-snapshot-per-char.
+        -- Merge per-character logs by walking a sorted time list and
+        -- advancing a pointer into each character's (already time-sorted)
+        -- log. Previous impl scanned each char log from the start for
+        -- every timestamp: O(t * c * n). The advancing-pointer approach
+        -- is O(total snapshots + t * c).
         local charLogs = {}
         for _, bucket in ns.IterCharacters() do
             if #bucket.goldLog > 0 then
@@ -262,17 +277,24 @@ function ns.CollectGoldLog(scope)
         end
         table.sort(times)
 
+        local ptrs = {}
+        for i = 1, #charLogs do ptrs[i] = 0 end
+
         local merged = {}
         local prev
         for _, t in ipairs(times) do
             if t ~= prev then
                 local sum = 0
-                for _, log in ipairs(charLogs) do
-                    local last
-                    for _, p in ipairs(log) do
-                        if p.t <= t then last = p else break end
+                for i, log in ipairs(charLogs) do
+                    local p = ptrs[i]
+                    -- Advance this char's pointer while the next entry is
+                    -- still ≤ t. Pointers only move forward, so the total
+                    -- work across all t iterations is bounded by #log.
+                    while p + 1 <= #log and log[p + 1].t <= t do
+                        p = p + 1
                     end
-                    if last then sum = sum + last.gold end
+                    ptrs[i] = p
+                    if p > 0 then sum = sum + log[p].gold end
                 end
                 merged[#merged + 1] = { t = t, gold = sum }
                 prev = t

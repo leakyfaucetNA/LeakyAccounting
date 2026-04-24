@@ -92,21 +92,12 @@ local function recordMail(index, tries)
     cod   = cod   or 0
 
     local id = mailId(sender, subject, money, daysLeft)
-    if taken[id] then
-        ns.lpmsg("mail: recordMail idx=" .. index .. " already taken: " .. id, "DEBUG")
-        return true
-    end
+    if taken[id] then return true end
 
     -- Classify via invoice first (TSM's approach).
     -- Returns: invoiceType, itemName, playerName, bid, buyout, deposit,
     --          consignment, moneyDelay, etaHour, etaMin, count
     local invoiceType, invItemName, invPlayer, invBid, _, _, _, _, _, _, invCount = GetInboxInvoiceInfo(index)
-
-    ns.lpmsg(string.format(
-        "mail: try=%d idx=%d subj=%q sender=%q money=%d cod=%d hasItem=%s invType=%s invItem=%q invPlayer=%q invBid=%s invCount=%s",
-        tries, index, tostring(subject), tostring(sender), money, cod, tostring(hasItem),
-        tostring(invoiceType), tostring(invItemName or ""), tostring(invPlayer or ""),
-        tostring(invBid), tostring(invCount)), "DEBUG")
 
     if invoiceType == "seller" then
         -- AH sale — money in header already = bid - ahcut (proceeds).
@@ -212,21 +203,18 @@ end
 function ns.MailOnLoad()
     local origTakeMoney = TakeInboxMoney
     TakeInboxMoney = function(index, subIndex)
-        ns.lpmsg("mail: TakeInboxMoney fired idx=" .. tostring(index), "DEBUG")
         attempt(origTakeMoney, "TakeInboxMoney", index, subIndex, 1)
     end
 
     local origTakeItem = TakeInboxItem
     TakeInboxItem = function(index, subIndex)
-        ns.lpmsg("mail: TakeInboxItem fired idx=" .. tostring(index) .. " sub=" .. tostring(subIndex), "DEBUG")
         attempt(origTakeItem, "TakeInboxItem", index, subIndex, 1)
     end
 
     local origAutoLoot = AutoLootMailItem
     AutoLootMailItem = function(index, subIndex)
-        ns.lpmsg("mail: AutoLootMailItem fired idx=" .. tostring(index), "DEBUG")
         attempt(origAutoLoot, "AutoLootMailItem", index, subIndex, 1)
     end
 
-    ns.lpmsg("Mail tracking armed.")
+    ns.lpmsg("Mail tracking armed.", "DEBUG")
 end

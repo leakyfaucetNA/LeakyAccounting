@@ -781,7 +781,10 @@ local function ensureLayout(parent, scope)
     ns.SetBD(dropdown, T.C_BG, T.C_BDR)
     dropdown:SetFrameStrata("DIALOG")
     dropdown:SetSize(DROP_W, PAD_D * 2 + TITLE_D + #FILTER_CATEGORIES * ROW_H_D)
-    dropdown:EnableMouse(true)
+    -- No EnableMouse on the dropdown itself — its own mouse-eating can
+    -- absorb clicks meant for the child Button rows. Padding clicks
+    -- fall through, which is fine since we've removed the outside-click
+    -- catcher; the only way to close the menu is the Filter button.
     dropdown:SetPoint("TOPRIGHT", filterBtn, "BOTTOMRIGHT", 0, -2)
     dropdown:Hide()
     layout.filterDropdown = dropdown
@@ -813,10 +816,19 @@ local function ensureLayout(parent, scope)
         row._refresh = refreshRow
         refreshRow()
 
+        row:RegisterForClicks("AnyUp")
         row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
         row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
         row:SetScript("OnClick", function()
-            state.filterSources[cat] = state.filterSources[cat] and nil or true
+            -- Can't use `X and nil or true` — that's the classic Lua
+            -- ternary trap: when the true-branch value is nil (falsy),
+            -- the expression always collapses to the false-branch. Use
+            -- an explicit if/else.
+            if state.filterSources[cat] then
+                state.filterSources[cat] = nil
+            else
+                state.filterSources[cat] = true
+            end
             refreshRow()
             ns.RenderItemized(parent, scope)
         end)
@@ -829,18 +841,11 @@ local function ensureLayout(parent, scope)
         end
     end
 
-    -- Mouse catcher: full-screen DIALOG-strata frame just beneath the
-    -- panel. Any click outside the panel hits the catcher and closes it.
-    local catcher = CreateFrame("Frame", nil, UIParent)
-    catcher:SetAllPoints(UIParent)
-    catcher:SetFrameStrata("DIALOG")
-    catcher:SetFrameLevel(dropdown:GetFrameLevel() - 1)
-    catcher:EnableMouse(true)
-    catcher:Hide()
-    catcher:SetScript("OnMouseDown", function() dropdown:Hide() end)
-    dropdown:SetScript("OnShow", function() catcher:Show() end)
-    dropdown:SetScript("OnHide", function() catcher:Hide() end)
-    layout.filterCatcher = catcher
+    -- Close-on-outside is intentionally NOT implemented right now — every
+    -- approach tried (full-screen catcher, GLOBAL_MOUSE_DOWN handler) has
+    -- interfered with clicks reaching the child Button rows. Users close
+    -- the dropdown by clicking the Filter button again, which toggles.
+    -- layout.filterCatcher is kept nil so destroyLayout's guard is a no-op.
 
     filterBtn:SetScript("OnClick", function()
         if dropdown:IsShown() then
@@ -848,7 +853,12 @@ local function ensureLayout(parent, scope)
         else
             dropdown._refresh()
             dropdown:Show()
-            dropdown:Raise()
+            -- Deliberately do NOT call dropdown:Raise() — it bumps the
+            -- dropdown's own level above its children's, so clicks on
+            -- the row area are absorbed by the dropdown Frame instead
+            -- of reaching the checkbox Buttons. The dropdown is already
+            -- in DIALOG strata above the HIGH-strata parent and above
+            -- the catcher, which is what we actually need.
         end
     end)
 

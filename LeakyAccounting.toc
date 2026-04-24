@@ -2,7 +2,7 @@
 ## Title: Leaky Accounting
 ## Notes: Lightweight accounting — tracks items bought/sold, gold spent/gained, per-character and account-wide.
 ## Author: Leaky-BleedingHollow
-## Version: 0.6.0
+## Version: 0.6.1
 ## SavedVariables: LeakyAccountingDB
 ## OptionalDeps: Ace3
 ## AddonCompartmentFunc: LeakyAccounting_OnCompartmentClick

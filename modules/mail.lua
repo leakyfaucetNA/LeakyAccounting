@@ -97,10 +97,14 @@ local function recordMail(index, tries)
     -- Classify via invoice first (TSM's approach).
     -- Returns: invoiceType, itemName, playerName, bid, buyout, deposit,
     --          consignment, moneyDelay, etaHour, etaMin, count
-    local invoiceType, invItemName, invPlayer, invBid, _, _, _, _, _, _, invCount = GetInboxInvoiceInfo(index)
+    local invoiceType, invItemName, invPlayer, invBid, _, _, invConsignment, _, _, _, invCount = GetInboxInvoiceInfo(index)
 
     if invoiceType == "seller" then
-        -- AH sale — money in header already = bid - ahcut (proceeds).
+        -- AH sale. TSM's pattern: proceeds = invoice.bid -
+        -- invoice.consignment (AH cut). The header "money" field also
+        -- reports proceeds but populates later than the invoice fields,
+        -- which produced rows with qty>0 but unitPrice=0 when we tried
+        -- to record before money had landed.
         if not invItemName or invItemName == "" then
             if tries <= NAME_RETRY_LIMIT then return false, true end
             invItemName = "Unknown auction item"
@@ -109,21 +113,36 @@ local function recordMail(index, tries)
             if tries <= NAME_RETRY_LIMIT then return false, true end
             invPlayer = "?"  -- match TSM fallback after giving up on seller-name resolution
         end
-        local qty = (invCount and invCount > 0) and invCount or 1
+        if not invBid or invBid <= 0 then
+            if tries <= NAME_RETRY_LIMIT then return false, true end
+            -- After retries exhaust, fall back to whatever's available
+            -- below (header.money or 0); a row with the right qty +
+            -- name beats no row at all.
+        end
+        local qty       = (invCount and invCount > 0) and invCount or 1
+        local proceeds  = (invBid or 0) - (invConsignment or 0)
+        if proceeds <= 0 then proceeds = money or 0 end  -- last-resort fallback
         ns.RecordTxn("sell", "auction", {
             itemName    = invItemName,
             qty         = qty,
-            unitPrice   = math.floor(money / qty),
+            unitPrice   = math.floor(proceeds / qty),
             otherPlayer = invPlayer,
         })
         markTaken(id)
         return true
 
     elseif invoiceType == "buyer" then
-        -- AH purchase — bid is total paid.
+        -- AH purchase — bid is total paid (could be the bid amount or a
+        -- buyout). Both bid and itemName populate slightly after the
+        -- mail arrives, so retry while either is missing.
         if not invItemName or invItemName == "" then
             if tries <= NAME_RETRY_LIMIT then return false, true end
             invItemName = "Unknown auction item"
+        end
+        if not invBid or invBid <= 0 then
+            if tries <= NAME_RETRY_LIMIT then return false, true end
+            -- Give up after retries — better to record qty with a 0
+            -- price than to drop the row entirely.
         end
         local itemLink = hasItem and GetInboxItemLink(index, 1) or nil
         local qty      = (invCount and invCount > 0) and invCount or 1
@@ -185,6 +204,14 @@ end
 -- -------------------------------------------------- --
 
 local function attempt(origFn, fnName, index, subIndex, tries)
+    -- Verify the slot still has data before doing anything. If a retry
+    -- fires after the user closed the inbox or a prior call already
+    -- consumed this mail, the slot is stale — calling Take* on it
+    -- raises the client-side "internal mail database" error. Bail
+    -- silently in that case (the user already moved on).
+    local _, _, _, subject = GetInboxHeaderInfo(index)
+    if not subject then return end
+
     local success, shouldRetry = recordMail(index, tries)
     if not success and shouldRetry and tries < MAX_RETRIES then
         ns.lpmsg(string.format("mail: %s idx=%s retry #%d", fnName, tostring(index), tries), "DEBUG")

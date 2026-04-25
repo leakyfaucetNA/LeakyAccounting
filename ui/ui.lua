@@ -373,14 +373,22 @@ local function build()
     end)
     grip:SetScript("OnMouseUp", function() frame:StopMovingOrSizing() end)
 
-    -- Re-render active tab when the frame is resized, and persist the
-    -- new dimensions so they survive /reload and new sessions.
+    -- Persist the new dimensions immediately (cheap), but debounce the
+    -- expensive refresh so we don't run the full Itemized pipeline 60+
+    -- times per second while the user is mid-drag. The frame contents
+    -- still resize visually via their TOPLEFT/BOTTOMRIGHT anchors;
+    -- refresh just recomputes rows/sort/filter once the drag settles.
+    local resizeTimer
     frame:SetScript("OnSizeChanged", function(self)
-        refresh()
         if ns.addon.db and ns.addon.db.profile then
             ns.addon.db.profile.frameWidth  = math.floor(self:GetWidth()  + 0.5)
             ns.addon.db.profile.frameHeight = math.floor(self:GetHeight() + 0.5)
         end
+        if resizeTimer then resizeTimer:Cancel() end
+        resizeTimer = C_Timer.NewTimer(0.1, function()
+            resizeTimer = nil
+            refresh()
+        end)
     end)
     frame:SetScript("OnShow", refresh)
 

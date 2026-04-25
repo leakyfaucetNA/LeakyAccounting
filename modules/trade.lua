@@ -28,13 +28,15 @@ local function snapshotSide(getItemInfo, getItemLink)
 end
 
 local function takeSnapshot()
+    -- Note the API naming asymmetry: items use GetTrade<Side>Item<X>
+    -- (Trade comes first), money uses Get<Side>TradeMoney (Side first).
     snapshot = {
         player = {
             items = snapshotSide(GetTradePlayerItemInfo, GetTradePlayerItemLink),
             money = GetPlayerTradeMoney(),
         },
         target = {
-            items = snapshotSide(GetTargetTradeItemInfo, GetTargetTradeItemLink),
+            items = snapshotSide(GetTradeTargetItemInfo, GetTradeTargetItemLink),
             money = GetTargetTradeMoney(),
         },
     }

@@ -87,7 +87,9 @@ function ns.RecordTxn(kind, source, info)
 
     local bucket = ns.EnsureCharacter()
     local entry = {
-        t           = time(),
+        -- Caller may pass info.t to backdate (e.g. AH mails record the
+        -- actual auction end time, not the time the player took the mail).
+        t           = info.t or time(),
         kind        = kind,
         source      = source,
         itemID      = ns.ItemIDFromLink(info.itemLink),

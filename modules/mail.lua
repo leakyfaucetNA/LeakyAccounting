@@ -99,6 +99,11 @@ local function recordMail(index, tries)
     --          consignment, moneyDelay, etaHour, etaMin, count
     local invoiceType, invItemName, invPlayer, invBid, _, _, invConsignment, _, _, _, invCount = GetInboxInvoiceInfo(index)
 
+    -- AH mails arrive after the auction completed. Backdate the row to
+    -- the actual sale time using mail expiry (30 days) minus daysLeft.
+    -- Matches TSM's accounting; makes the "Last N days" view accurate.
+    local ahTime = (daysLeft and time() + (daysLeft - 30) * 86400) or time()
+
     if invoiceType == "seller" then
         -- AH sale. TSM's pattern: proceeds = invoice.bid -
         -- invoice.consignment (AH cut). The header "money" field also
@@ -111,13 +116,10 @@ local function recordMail(index, tries)
         end
         if not invPlayer or invPlayer == "" then
             if tries <= NAME_RETRY_LIMIT then return false, true end
-            invPlayer = "?"  -- match TSM fallback after giving up on seller-name resolution
+            invPlayer = AUCTION_HOUSE_MAIL_MULTIPLE_BUYERS or "?"
         end
         if not invBid or invBid <= 0 then
             if tries <= NAME_RETRY_LIMIT then return false, true end
-            -- After retries exhaust, fall back to whatever's available
-            -- below (header.money or 0); a row with the right qty +
-            -- name beats no row at all.
         end
         local qty       = (invCount and invCount > 0) and invCount or 1
         local proceeds  = (invBid or 0) - (invConsignment or 0)
@@ -127,6 +129,7 @@ local function recordMail(index, tries)
             qty         = qty,
             unitPrice   = math.floor(proceeds / qty),
             otherPlayer = invPlayer,
+            t           = ahTime,
         })
         markTaken(id)
         return true
@@ -141,8 +144,6 @@ local function recordMail(index, tries)
         end
         if not invBid or invBid <= 0 then
             if tries <= NAME_RETRY_LIMIT then return false, true end
-            -- Give up after retries — better to record qty with a 0
-            -- price than to drop the row entirely.
         end
         local itemLink = hasItem and GetInboxItemLink(index, 1) or nil
         local qty      = (invCount and invCount > 0) and invCount or 1
@@ -152,7 +153,9 @@ local function recordMail(index, tries)
             itemName    = (not itemLink) and invItemName or nil,
             qty         = qty,
             unitPrice   = price,
-            otherPlayer = (invPlayer and invPlayer ~= "") and invPlayer or "Auction House",
+            otherPlayer = (invPlayer and invPlayer ~= "") and invPlayer
+                          or AUCTION_HOUSE_MAIL_MULTIPLE_SELLERS or "Auction House",
+            t           = ahTime,
         })
         markTaken(id)
         return true
@@ -208,12 +211,20 @@ local function attempt(origFn, fnName, index, subIndex, tries)
     -- fires after the user closed the inbox or a prior call already
     -- consumed this mail, the slot is stale — calling Take* on it
     -- raises the client-side "internal mail database" error. Bail
-    -- silently in that case (the user already moved on).
-    local _, _, _, subject = GetInboxHeaderInfo(index)
+    -- silently in that case (the user already moved on). Also capture
+    -- `texture` here: when the header texture is nil, the server
+    -- hasn't fully loaded the mail row yet, so we should retry even
+    -- when recordMail "succeeded" — invoice fields may not be ready
+    -- (TSM uses the same `not texture or shouldRetry` retry guard).
+    -- 2nd return is stationeryIcon — present once the mail row is fully
+    -- loaded server-side. TSM uses this exact field as their texture
+    -- check; packageIcon (1st) only exists for mails with attachments.
+    local _, texture, _, subject = GetInboxHeaderInfo(index)
     if not subject then return end
 
     local success, shouldRetry = recordMail(index, tries)
-    if not success and shouldRetry and tries < MAX_RETRIES then
+    local needRetry = (not success and shouldRetry) or (not texture)
+    if needRetry and tries < MAX_RETRIES then
         ns.lpmsg(string.format("mail: %s idx=%s retry #%d", fnName, tostring(index), tries), "DEBUG")
         C_Timer.After(RETRY_DELAY, function()
             attempt(origFn, fnName, index, subIndex, tries + 1)

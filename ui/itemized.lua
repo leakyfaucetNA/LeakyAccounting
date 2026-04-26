@@ -31,6 +31,11 @@ local WINDOW_H  = 24
 -- trade-pay / trade-receive in one click.
 local FILTER_CATEGORIES = { "Vendor", "Auction", "Trade", "Repair", "Mail" }
 
+-- Buy/Sell filter categories — match against `t.kind` (lowercased) via a
+-- mapping. Stored under state.filterKinds with the friendly label as key
+-- so it shares the same shape as filterSources.
+local KIND_CATEGORIES = { "Buy", "Sell" }
+
 -- Default filter state = every category enabled (nothing filtered out).
 -- Unchecking a category narrows the list. Emptying all categories hides
 -- everything — consistent "checkbox = allowed" semantics.
@@ -39,10 +44,17 @@ local function defaultFilterSources()
     for _, c in ipairs(FILTER_CATEGORIES) do t[c] = true end
     return t
 end
+local function defaultFilterKinds()
+    local t = {}
+    for _, c in ipairs(KIND_CATEGORIES) do t[c] = true end
+    return t
+end
 
 local session = {
-    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7, filterSources = defaultFilterSources() },
-    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7, filterSources = defaultFilterSources() },
+    char    = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7,
+                filterSources = defaultFilterSources(), filterKinds = defaultFilterKinds() },
+    account = { sortKey = "date", sortDir = "desc", widths = {}, search = "", windowDays = 7,
+                filterSources = defaultFilterSources(), filterKinds = defaultFilterKinds() },
 }
 
 -- Debounce render calls that come from fast-firing input events (search
@@ -206,19 +218,25 @@ end
 --  Filter / sort                                     --
 -- -------------------------------------------------- --
 
-local function filterTxns(txns, query, windowDays, filterSources)
+local function filterTxns(txns, query, windowDays, filterSources, filterKinds)
     local q       = (query and query ~= "") and query:lower() or nil
     local cutoff  = (windowDays and windowDays > 0) and (time() - windowDays * 86400) or nil
 
-    -- Determine whether the source filter is actually narrowing the list.
-    -- If every known category is checked, we skip the per-row check.
+    -- Determine whether each filter set is actually narrowing the list.
+    -- If every category in a set is checked, we can skip its per-row check.
     local useSrc = false
     if filterSources then
         for _, cat in ipairs(FILTER_CATEGORIES) do
             if not filterSources[cat] then useSrc = true; break end
         end
     end
-    if not q and not cutoff and not useSrc then return txns end
+    local useKind = false
+    if filterKinds then
+        for _, cat in ipairs(KIND_CATEGORIES) do
+            if not filterKinds[cat] then useKind = true; break end
+        end
+    end
+    if not q and not cutoff and not useSrc and not useKind then return txns end
 
     local out = {}
     for _, t in ipairs(txns) do
@@ -226,6 +244,10 @@ local function filterTxns(txns, query, windowDays, filterSources)
         if cutoff and t.t and t.t < cutoff then pass = false end
         if pass and useSrc then
             if not filterSources[ns.FormatSource(t.source)] then pass = false end
+        end
+        if pass and useKind then
+            local label = (t.kind == "sell") and "Sell" or (t.kind == "buy") and "Buy" or nil
+            if not label or not filterKinds[label] then pass = false end
         end
         if pass and q then
             local hay = table.concat({
@@ -775,70 +797,91 @@ local function ensureLayout(parent, scope)
     local PAD_D   = 6
     local ROW_H_D = 22
     local TITLE_D = 22
+    local SEP_H   = 8
     local DROP_W  = 170
+
+    local totalDropH = PAD_D
+                     + TITLE_D + #FILTER_CATEGORIES * ROW_H_D
+                     + SEP_H
+                     + TITLE_D + #KIND_CATEGORIES   * ROW_H_D
+                     + PAD_D
 
     local dropdown = CreateFrame("Frame", nil, parent, "BackdropTemplate")
     ns.SetBD(dropdown, T.C_BG, T.C_BDR)
     dropdown:SetFrameStrata("DIALOG")
-    dropdown:SetSize(DROP_W, PAD_D * 2 + TITLE_D + #FILTER_CATEGORIES * ROW_H_D)
-    -- No EnableMouse on the dropdown itself — its own mouse-eating can
-    -- absorb clicks meant for the child Button rows. Padding clicks
-    -- fall through, which is fine since we've removed the outside-click
-    -- catcher; the only way to close the menu is the Filter button.
+    dropdown:SetSize(DROP_W, totalDropH)
     dropdown:SetPoint("TOPRIGHT", filterBtn, "BOTTOMRIGHT", 0, -2)
     dropdown:Hide()
     layout.filterDropdown = dropdown
 
-    local dropTitle = ns.MakeLabel(dropdown, "Source", 12, T.C_ACCENT)
-    dropTitle:SetPoint("TOPLEFT", PAD_D + 4, -PAD_D)
+    local rowRefreshers = {}  -- collected per-section so dropdown._refresh syncs all
 
-    for i, cat in ipairs(FILTER_CATEGORIES) do
-        local row = CreateFrame("Button", nil, dropdown, "BackdropTemplate")
-        row:SetHeight(ROW_H_D - 2)
-        row:SetPoint("TOPLEFT",  PAD_D, -(PAD_D + TITLE_D + (i - 1) * ROW_H_D))
-        row:SetPoint("TOPRIGHT", -PAD_D, -(PAD_D + TITLE_D + (i - 1) * ROW_H_D))
-        ns.SetBD(row, T.C_PANEL, T.C_BDR)
+    -- Builds one section: a header label, then a checkbox row per
+    -- category. `stateMap` is the table that holds the section's
+    -- on/off bits (state.filterSources or state.filterKinds).
+    local function buildSection(headerText, categories, stateMap, startY)
+        local header = ns.MakeLabel(dropdown, headerText, 12, T.C_ACCENT)
+        header:SetPoint("TOPLEFT", PAD_D + 4, startY)
+        local y = startY - TITLE_D
 
-        local box = CreateFrame("Frame", nil, row, "BackdropTemplate")
-        box:SetSize(12, 12)
-        box:SetPoint("LEFT", 6, 0)
-        ns.SetBD(box, T.C_ELEM, T.C_BDR)
-        local fill = box:CreateTexture(nil, "OVERLAY")
-        fill:SetTexture(T.TEX)
-        fill:SetPoint("TOPLEFT", 2, -2)
-        fill:SetPoint("BOTTOMRIGHT", -2, 2)
-        fill:SetVertexColor(unpack(T.C_ACCENT))
+        for _, cat in ipairs(categories) do
+            local row = CreateFrame("Button", nil, dropdown, "BackdropTemplate")
+            row:SetHeight(ROW_H_D - 2)
+            row:SetPoint("TOPLEFT",  PAD_D, y)
+            row:SetPoint("TOPRIGHT", -PAD_D, y)
+            ns.SetBD(row, T.C_PANEL, T.C_BDR)
 
-        local lbl = ns.MakeLabel(row, cat, 12, T.C_TEXT)
-        lbl:SetPoint("LEFT", box, "RIGHT", 8, 0)
+            local box = CreateFrame("Frame", nil, row, "BackdropTemplate")
+            box:SetSize(12, 12)
+            box:SetPoint("LEFT", 6, 0)
+            ns.SetBD(box, T.C_ELEM, T.C_BDR)
+            local fill = box:CreateTexture(nil, "OVERLAY")
+            fill:SetTexture(T.TEX)
+            fill:SetPoint("TOPLEFT", 2, -2)
+            fill:SetPoint("BOTTOMRIGHT", -2, 2)
+            fill:SetVertexColor(unpack(T.C_ACCENT))
 
-        local function refreshRow() fill:SetShown(state.filterSources[cat] == true) end
-        row._refresh = refreshRow
-        refreshRow()
+            local lbl = ns.MakeLabel(row, cat, 12, T.C_TEXT)
+            lbl:SetPoint("LEFT", box, "RIGHT", 8, 0)
 
-        row:RegisterForClicks("AnyUp")
-        row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
-        row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
-        row:SetScript("OnClick", function()
-            -- Can't use `X and nil or true` — that's the classic Lua
-            -- ternary trap: when the true-branch value is nil (falsy),
-            -- the expression always collapses to the false-branch. Use
-            -- an explicit if/else.
-            if state.filterSources[cat] then
-                state.filterSources[cat] = nil
-            else
-                state.filterSources[cat] = true
-            end
+            local function refreshRow() fill:SetShown(stateMap[cat] == true) end
             refreshRow()
-            ns.RenderItemized(parent, scope)
-        end)
+            rowRefreshers[#rowRefreshers + 1] = refreshRow
 
-        dropdown[cat] = row
-    end
-    dropdown._refresh = function()
-        for _, cat in ipairs(FILTER_CATEGORIES) do
-            local r = dropdown[cat]; if r and r._refresh then r._refresh() end
+            row:RegisterForClicks("AnyUp")
+            row:SetScript("OnEnter", function(s) s:SetBackdropColor(unpack(T.C_HOVER)) end)
+            row:SetScript("OnLeave", function(s) s:SetBackdropColor(unpack(T.C_PANEL)) end)
+            row:SetScript("OnClick", function()
+                if stateMap[cat] then
+                    stateMap[cat] = nil
+                else
+                    stateMap[cat] = true
+                end
+                refreshRow()
+                ns.RenderItemized(parent, scope)
+            end)
+
+            y = y - ROW_H_D
         end
+        return y  -- next section starts here
+    end
+
+    local nextY = buildSection("Source", FILTER_CATEGORIES, state.filterSources, -PAD_D)
+
+    -- Separator line between sections
+    local sepY = nextY - math.floor(SEP_H / 2)
+    local sep = dropdown:CreateTexture(nil, "OVERLAY")
+    sep:SetTexture(T.TEX)
+    sep:SetVertexColor(unpack(T.C_BDR))
+    sep:SetHeight(1)
+    sep:SetPoint("LEFT",  dropdown, "TOPLEFT",  PAD_D, sepY)
+    sep:SetPoint("RIGHT", dropdown, "TOPRIGHT", -PAD_D, sepY)
+    nextY = nextY - SEP_H
+
+    buildSection("Kind", KIND_CATEGORIES, state.filterKinds, nextY)
+
+    dropdown._refresh = function()
+        for _, fn in ipairs(rowRefreshers) do fn() end
     end
 
     -- Close-on-outside is intentionally NOT implemented right now — every
@@ -1067,12 +1110,15 @@ function ns.RenderItemized(parent, scope)
     updateHeaderArrows(layout)
     layoutHeaderAndRows(layout)
 
-    -- Filter button label: "Filter" when every category is checked (no
-    -- narrowing); "Filter (N/Total)" when the list has been narrowed.
+    -- Filter button label: "Filter" when every category in both sections
+    -- is checked; "Filter (N/Total)" when the list has been narrowed.
     if layout.filterBtn and layout.filterBtn.text then
-        local checked, total = 0, #FILTER_CATEGORIES
+        local checked, total = 0, #FILTER_CATEGORIES + #KIND_CATEGORIES
         for _, cat in ipairs(FILTER_CATEGORIES) do
             if state.filterSources[cat] then checked = checked + 1 end
+        end
+        for _, cat in ipairs(KIND_CATEGORIES) do
+            if state.filterKinds[cat] then checked = checked + 1 end
         end
         if checked == total then
             layout.filterBtn.text:SetText("Filter")
@@ -1082,7 +1128,7 @@ function ns.RenderItemized(parent, scope)
     end
 
     local txns = ns.CollectTxns(scope)
-    txns = filterTxns(txns, state.search, state.windowDays, state.filterSources)
+    txns = filterTxns(txns, state.search, state.windowDays, state.filterSources, state.filterKinds)
     sortTxns(txns, layout.cols, state.sortKey, state.sortDir)
 
     -- Totals over whatever is currently shown (i.e. post-filter). Also

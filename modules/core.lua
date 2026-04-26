@@ -336,6 +336,28 @@ function ns.FormatMoney(copper)
 end
 
 -- -------------------------------------------------- --
+--  Migrations                                        --
+-- -------------------------------------------------- --
+
+-- One-shot scrub: remove `otherPlayer` from every stored auction row
+-- across every character. Gated by db.global.schemaVersion in main.lua
+-- so it runs once after the upgrade. Idempotent — safe to re-run.
+function ns.MigrateStripAuctionPlayers()
+    local removed = 0
+    for _, bucket in pairs(ns.addon.db.global.characters) do
+        for _, t in ipairs(bucket.transactions or {}) do
+            if t.source == "auction" and t.otherPlayer ~= nil then
+                t.otherPlayer = nil
+                removed = removed + 1
+            end
+        end
+    end
+    if removed > 0 then
+        ns.lpmsg("Migration: stripped " .. removed .. " buyer/seller names from saved auction rows.")
+    end
+end
+
+-- -------------------------------------------------- --
 --  Reset helpers                                     --
 -- -------------------------------------------------- --
 

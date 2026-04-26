@@ -53,6 +53,15 @@ function LA:OnInitialize()
     self.db = ADB:New("LeakyAccountingDB", defaults, true)
     ns.EnsureCharacter()
 
+    -- Run any pending one-shot migrations against the saved variables.
+    -- Schema version is bumped after each migration so we only do it once.
+    if (self.db.global.schemaVersion or 0) < 2 then
+        if ns.MigrateStripAuctionPlayers then
+            ns.MigrateStripAuctionPlayers()
+        end
+        self.db.global.schemaVersion = 2
+    end
+
     self:RegisterEvent("PLAYER_LOGIN")
 end
 

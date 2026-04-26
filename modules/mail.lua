@@ -97,7 +97,7 @@ local function recordMail(index, tries)
     -- Classify via invoice first (TSM's approach).
     -- Returns: invoiceType, itemName, playerName, bid, buyout, deposit,
     --          consignment, moneyDelay, etaHour, etaMin, count
-    local invoiceType, invItemName, invPlayer, invBid, _, _, invConsignment, _, _, _, invCount = GetInboxInvoiceInfo(index)
+    local invoiceType, invItemName, _, invBid, _, _, invConsignment, _, _, _, invCount = GetInboxInvoiceInfo(index)
 
     -- AH mails arrive after the auction completed. Backdate the row to
     -- the actual sale time using mail expiry (30 days) minus daysLeft.
@@ -109,14 +109,11 @@ local function recordMail(index, tries)
         -- invoice.consignment (AH cut). The header "money" field also
         -- reports proceeds but populates later than the invoice fields,
         -- which produced rows with qty>0 but unitPrice=0 when we tried
-        -- to record before money had landed.
+        -- to record before money had landed. We deliberately don't
+        -- store the buyer's character name on AH rows.
         if not invItemName or invItemName == "" then
             if tries <= NAME_RETRY_LIMIT then return false, true end
             invItemName = "Unknown auction item"
-        end
-        if not invPlayer or invPlayer == "" then
-            if tries <= NAME_RETRY_LIMIT then return false, true end
-            invPlayer = AUCTION_HOUSE_MAIL_MULTIPLE_BUYERS or "?"
         end
         if not invBid or invBid <= 0 then
             if tries <= NAME_RETRY_LIMIT then return false, true end
@@ -128,7 +125,6 @@ local function recordMail(index, tries)
             itemName    = invItemName,
             qty         = qty,
             unitPrice   = math.floor(proceeds / qty),
-            otherPlayer = invPlayer,
             t           = ahTime,
         })
         markTaken(id)
@@ -136,8 +132,8 @@ local function recordMail(index, tries)
 
     elseif invoiceType == "buyer" then
         -- AH purchase — bid is total paid (could be the bid amount or a
-        -- buyout). Both bid and itemName populate slightly after the
-        -- mail arrives, so retry while either is missing.
+        -- buyout). The seller's character name is intentionally not
+        -- stored on AH rows.
         if not invItemName or invItemName == "" then
             if tries <= NAME_RETRY_LIMIT then return false, true end
             invItemName = "Unknown auction item"
@@ -153,8 +149,6 @@ local function recordMail(index, tries)
             itemName    = (not itemLink) and invItemName or nil,
             qty         = qty,
             unitPrice   = price,
-            otherPlayer = (invPlayer and invPlayer ~= "") and invPlayer
-                          or AUCTION_HOUSE_MAIL_MULTIPLE_SELLERS or "Auction House",
             t           = ahTime,
         })
         markTaken(id)

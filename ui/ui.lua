@@ -139,7 +139,18 @@ local chartContent, itemizedContent, charactersContent
 local chartBtn, itemizedBtn, charactersBtn
 local scopeCharBtn, scopeAccountBtn, scopeLbl
 
+-- Combat gate: skip event-driven UI work while the player is in combat
+-- so we don't spend CPU on background re-renders during fights. Any
+-- refresh that gets blocked sets `pendingRefresh`; PLAYER_REGEN_ENABLED
+-- runs it once combat ends if the frame is still shown.
+local pendingRefresh = false
+
 local function refresh()
+    if InCombatLockdown() then
+        pendingRefresh = true
+        return
+    end
+
     chartContent:SetShown(activeTab == "chart")
     itemizedContent:SetShown(activeTab == "itemized")
     charactersContent:SetShown(activeTab == "characters")
@@ -167,6 +178,19 @@ end
 -- Re-render if we're open when data changes.
 function ns.OnDataChanged()
     if frame and frame:IsShown() then refresh() end
+end
+
+-- Watch combat state. While in combat, refresh() is gated; on combat
+-- exit, we flush a single refresh if anything was queued.
+do
+    local watcher = CreateFrame("Frame")
+    watcher:RegisterEvent("PLAYER_REGEN_ENABLED")
+    watcher:SetScript("OnEvent", function()
+        if pendingRefresh and frame and frame:IsShown() then
+            pendingRefresh = false
+            refresh()
+        end
+    end)
 end
 
 local function build()
@@ -392,15 +416,31 @@ local function build()
     end)
     frame:SetScript("OnShow", refresh)
 
-    -- When the frame hides, belt-and-suspenders-Hide the tab content panels
-    -- so any scroll / slider descendants follow (a few Slider children in
-    -- retail don't reliably cascade-hide via parent visibility alone).
+    -- When the frame hides, explicitly Hide() every scroll/slider/dialog
+    -- descendant we know about. Slider frames with custom thumbs and
+    -- DIALOG-strata children occasionally ghost past the parent's
+    -- cascade-hide in retail; calling Hide directly on each is the
+    -- only reliable way to make them disappear with the main window.
     -- Also hide GameTooltip so hover state doesn't leave it floating.
+    local function teardownLayout(layout)
+        if not layout then return end
+        if layout.filterDropdown then layout.filterDropdown:Hide() end
+        if layout.headerScroll   then layout.headerScroll:Hide()   end
+        if layout.scroll         then layout.scroll:Hide()         end
+        if layout.hscroll        then layout.hscroll:Hide()        end
+        if layout.vscroll        then layout.vscroll:Hide()        end
+    end
     frame:SetScript("OnHide", function()
         GameTooltip:Hide()
         if chartContent      then chartContent:Hide()      end
-        if itemizedContent   then itemizedContent:Hide()   end
-        if charactersContent then charactersContent:Hide() end
+        if itemizedContent   then
+            teardownLayout(itemizedContent._layout)
+            itemizedContent:Hide()
+        end
+        if charactersContent then
+            teardownLayout(charactersContent._charsLayout)
+            charactersContent:Hide()
+        end
     end)
 
     return frame

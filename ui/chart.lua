@@ -226,16 +226,19 @@ end
 --  Render                                            --
 -- -------------------------------------------------- --
 
+-- Y-axis labels: compact, units-stripped. Big numbers truncate (1.5M,
+-- 988.7k); small numbers stay numeric. The full comma-separated gold
+-- value is reserved for the totals row and itemized table where space
+-- is available.
 local function formatGoldShort(copper)
     copper = copper or 0
     local neg = copper < 0
-    local c = math.abs(copper)
-    local g = c / 10000
+    local g = math.abs(copper) / 10000  -- gold as a float
     local s
-    if g >= 1000000 then s = string.format("%.1fM g", g / 1000000)
-    elseif g >= 1000 then s = string.format("%.1fk g", g / 1000)
-    elseif g >= 1    then s = string.format("%d g",    math.floor(g))
-    else                 s = string.format("%d s",    math.floor(c / 100))
+    if     g >= 1000000 then s = string.format("%.1fM", g / 1000000)
+    elseif g >= 1000    then s = string.format("%.1fk", g / 1000)
+    elseif g >= 1       then s = string.format("%d",    math.floor(g))
+    else                     s = string.format("%.1f",  g)
     end
     return neg and ("-" .. s) or s
 end

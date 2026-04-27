@@ -86,13 +86,16 @@ function ns.RecordTxn(kind, source, info)
     end
 
     local bucket = ns.EnsureCharacter()
+    -- Stored shape kept minimal: itemID is omitted because it can be
+    -- parsed from itemLink on read for the rare paths that need it.
+    -- Lua doesn't store nil keys, so omitting fields like otherPlayer
+    -- is a real saved-vars size win on rows where they aren't needed.
     local entry = {
         -- Caller may pass info.t to backdate (e.g. AH mails record the
         -- actual auction end time, not the time the player took the mail).
         t           = info.t or time(),
         kind        = kind,
         source      = source,
-        itemID      = ns.ItemIDFromLink(info.itemLink),
         itemLink    = info.itemLink,
         itemName    = info.itemName,
         qty         = info.qty,
@@ -127,6 +130,9 @@ function ns.RecordMoney(delta, reason, otherPlayer)
 end
 
 -- Store a sparse snapshot of GetMoney(). Called by money.lua on PLAYER_MONEY.
+-- FIFO-capped at MAX_GOLDLOG so an active character can't bloat saved
+-- variables indefinitely; oldest entries drop once the cap is hit.
+local MAX_GOLDLOG = 5000
 function ns.RecordGoldSnapshot(gold)
     local bucket = ns.EnsureCharacter()
     local log = bucket.goldLog
@@ -137,6 +143,7 @@ function ns.RecordGoldSnapshot(gold)
         if last.gold == gold and (time() - last.t) < 60 then return end
     end
     log[n + 1] = { t = time(), gold = gold }
+    if n + 1 > MAX_GOLDLOG then table.remove(log, 1) end
 end
 
 -- -------------------------------------------------- --
@@ -157,7 +164,9 @@ function ns.CollectTxns(scope)
             t           = txn.t,
             kind        = txn.kind,
             source      = txn.source,
-            itemID      = txn.itemID,
+            -- itemID isn't stored anymore; derive from the link on read.
+            -- Older saved entries may still have it — honor that.
+            itemID      = txn.itemID or ns.ItemIDFromLink(txn.itemLink),
             itemLink    = txn.itemLink,
             itemName    = txn.itemName,
             qty         = txn.qty,
@@ -316,6 +325,20 @@ end
 --  Money formatting                                  --
 -- -------------------------------------------------- --
 
+-- US-style thousands separator on a non-negative integer. Repeatedly
+-- inserts a comma between the trailing 3 digits and a preceding digit
+-- group until no more groups can be split. Used to render gold counts
+-- in full instead of with K/M truncation.
+function ns.WithCommas(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    while true do
+        local out, count = s:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+        s = out
+        if count == 0 then break end
+    end
+    return s
+end
+
 function ns.FormatMoney(copper)
     copper = copper or 0
     local neg = copper < 0
@@ -325,7 +348,8 @@ function ns.FormatMoney(copper)
     local c = copper % 100
     local str
     if g > 0 then
-        str = string.format("|cffffd100%d|rg |cffc7c7cf%d|rs |cffeda55f%d|rc", g, s, c)
+        str = string.format("|cffffd100%s|rg |cffc7c7cf%d|rs |cffeda55f%d|rc",
+            ns.WithCommas(g), s, c)
     elseif s > 0 then
         str = string.format("|cffc7c7cf%d|rs |cffeda55f%d|rc", s, c)
     else
@@ -354,6 +378,42 @@ function ns.MigrateStripAuctionPlayers()
     end
     if removed > 0 then
         ns.lpmsg("Migration: stripped " .. removed .. " buyer/seller names from saved auction rows.")
+    end
+end
+
+-- One-shot saved-vars cleanup:
+--   * Drop `otherPlayer` on vendor txns (always "Merchant" / buyback variant)
+--   * Drop `otherPlayer` on repair / guild-repair money entries
+--   * Drop `itemID` from txns where itemLink is present (parsed on read)
+--   * FIFO-trim each character's goldLog to MAX_GOLDLOG
+function ns.MigrateMinimizeStorage()
+    local stripped, trimmed = 0, 0
+    for _, bucket in pairs(ns.addon.db.global.characters) do
+        for _, t in ipairs(bucket.transactions or {}) do
+            if t.source == "vendor" and t.otherPlayer ~= nil then
+                t.otherPlayer = nil; stripped = stripped + 1
+            end
+            if t.itemID ~= nil and t.itemLink ~= nil then
+                t.itemID = nil; stripped = stripped + 1
+            end
+        end
+        for _, m in ipairs(bucket.money or {}) do
+            if (m.reason == "repair" or m.reason == "guild-repair")
+               and m.otherPlayer ~= nil then
+                m.otherPlayer = nil; stripped = stripped + 1
+            end
+        end
+        local log = bucket.goldLog
+        if log then
+            while #log > MAX_GOLDLOG do
+                table.remove(log, 1); trimmed = trimmed + 1
+            end
+        end
+    end
+    if stripped > 0 or trimmed > 0 then
+        ns.lpmsg(string.format(
+            "Migration: removed %d redundant fields, trimmed %d gold-log entries.",
+            stripped, trimmed))
     end
 end
 

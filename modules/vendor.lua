@@ -37,11 +37,13 @@ local function OnBuyMerchantItem(index, quantity)
     local totalUnits    = stacksBought * unitsPerStack
     local unitPrice     = math.floor(info.price / unitsPerStack)
 
+    -- otherPlayer is omitted for vendor rows — it would always be the
+    -- string "Merchant" and the Other column never displays vendor
+    -- entries. Saves bytes per row in saved variables.
     ns.RecordTxn("buy", "vendor", {
         itemLink    = link,
         qty         = totalUnits,
         unitPrice   = unitPrice,
-        otherPlayer = "Merchant",
     })
     sessionTxnSpend = sessionTxnSpend + (stacksBought * info.price)
 end
@@ -57,7 +59,6 @@ local function OnBuybackItem(index)
         itemLink    = link,
         qty         = qty or 1,
         unitPrice   = math.floor(price / (qty or 1)),
-        otherPlayer = "Merchant (buyback)",
     })
     sessionTxnSpend = sessionTxnSpend + price
 end
@@ -102,7 +103,6 @@ local function ResolvePendingSale()
         itemLink    = ps.link,
         qty         = sold,
         unitPrice   = unitPrice,
-        otherPlayer = "Merchant",
     })
     sessionTxnIncome = sessionTxnIncome + goldDelta
 end
@@ -125,14 +125,15 @@ local function OnMerchantClosed()
         local txnDelta     = sessionTxnIncome - sessionTxnSpend
         local unattributed = actualDelta - txnDelta
         if sawDurability and unattributed < 0 then
-            ns.RecordMoney(unattributed, "repair", "Merchant")
+            ns.RecordMoney(unattributed, "repair")
         end
         -- Guild-funded repair: player's wallet didn't change, so the normal
         -- delta-based detector doesn't fire. Record it separately so the
         -- row shows in the log, but the itemized totals skip it (see
-        -- totals computation in ui/itemized.lua).
+        -- totals computation in ui/itemized.lua). otherPlayer is omitted —
+        -- the "Guild Repair" label is rendered by the Other column itself.
         if sessionGuildRepair and sessionGuildRepair > 0 then
-            ns.RecordMoney(-sessionGuildRepair, "guild-repair", "Guild Repair")
+            ns.RecordMoney(-sessionGuildRepair, "guild-repair")
         end
     end
     merchantOpen      = false
@@ -190,7 +191,6 @@ function ns.VendorOnLoad()
                                 itemLink    = info.hyperlink,
                                 qty         = qty,
                                 unitPrice   = sellPrice,
-                                otherPlayer = "Merchant",
                             })
                             sessionTxnIncome = sessionTxnIncome + sellPrice * qty
                         end

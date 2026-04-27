@@ -195,16 +195,20 @@ local function buildColumns(scope)
             -- trade-gold in/out) and for guild-funded repairs. Vendors,
             -- auction, plain mail gold, and self-paid repairs have no
             -- meaningful counterparty so we leave the cell blank there.
+            -- "Guild Repair" is rendered from a fixed string; the
+            -- actual value isn't stored on guild-repair money entries.
             render = function(t)
                 local src = t.source or ""
-                if src == "trade" or src:match("^trade%-") or src == "guild-repair" then
+                if src == "guild-repair" then return "Guild Repair", T.C_DIM end
+                if src == "trade" or src:match("^trade%-") then
                     return t.otherPlayer or "", T.C_DIM
                 end
                 return "", T.C_DIM
             end,
             sortVal = function(t)
                 local src = t.source or ""
-                if src == "trade" or src:match("^trade%-") or src == "guild-repair" then
+                if src == "guild-repair" then return "guild repair" end
+                if src == "trade" or src:match("^trade%-") then
                     return (t.otherPlayer or ""):lower()
                 end
                 return ""

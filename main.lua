@@ -61,6 +61,12 @@ function LA:OnInitialize()
         end
         self.db.global.schemaVersion = 2
     end
+    if (self.db.global.schemaVersion or 0) < 3 then
+        if ns.MigrateMinimizeStorage then
+            ns.MigrateMinimizeStorage()
+        end
+        self.db.global.schemaVersion = 3
+    end
 
     self:RegisterEvent("PLAYER_LOGIN")
 end
